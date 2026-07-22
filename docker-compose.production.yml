@@ -1,0 +1,109 @@
+services:
+  app:
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log
+    env_file: !override ${APP_ENV_FILE:-.env.production}
+    environment:
+      APP_MODE: api
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  bot:
+    env_file: !override ${APP_ENV_FILE:-.env.production}
+    environment:
+      APP_MODE: bot
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
+    logging: *logging
+
+  scheduler:
+    env_file: !override ${APP_ENV_FILE:-.env.production}
+    environment:
+      APP_MODE: scheduler
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    logging: *logging
+
+  migrations:
+    env_file: !override ${APP_ENV_FILE:-.env.production}
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  postgres:
+    restart: unless-stopped
+    ports: !reset []
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 1G
+    logging: *logging
+
+  redis:
+    restart: unless-stopped
+    ports: !reset []
+    command: redis-server --save 60 1 --loglevel warning
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+    logging: *logging

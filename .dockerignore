@@ -1,0 +1,23 @@
+.git
+.agents
+.codex
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env*
+.pgdata
+.docker-codex
+subscription.db
+subscription.db-journal
+Docker Desktop Installer.exe
+*.log
+*.pid
+backups
+tests
+scripts
+*.dump
+*.backup

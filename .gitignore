@@ -60,6 +60,17 @@ cover/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+subscription.db
+subscription.db-journal
+api.out.log
+api.err.log
+api.pid
+.pgdata/
+.docker-codex/
+Docker Desktop Installer.exe
+pg.log
+pg.out.log
+pg.err.log
 
 # Flask stuff:
 instance/
@@ -129,6 +140,10 @@ celerybeat.pid
 
 # Environments
 .env
+.env.production
+backups/
+*.dump
+*.backup
 .venv
 env/
 venv/
