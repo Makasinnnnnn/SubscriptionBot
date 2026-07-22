@@ -151,6 +151,7 @@ class SubscriptionService:
         await self.session.flush()
 
         invite_link = await self._create_or_refresh_invite(subscription, channel, bot)
+        await self._create_materials_invite(subscription, bot)
         await self._notify_admins(
             bot,
             "subscriptions",
@@ -209,6 +210,7 @@ class SubscriptionService:
         subscription.source = "manual"
         await self.session.flush()
         invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot)
+        await self._create_materials_invite(subscription, bot)
         return subscription, invite
 
     async def refresh_invite(
@@ -228,6 +230,7 @@ class SubscriptionService:
         if subscription is None:
             raise ValueError("Active subscription not found")
         invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot)
+        await self._create_materials_invite(subscription, bot)
         return subscription, invite
 
     async def revoke_user(
@@ -540,7 +543,7 @@ class SubscriptionService:
                         subscription.id,
                         type(exc).__name__,
                     )
-            if materials_channel_id is not None and subscription.payment_id is not None:
+            if materials_channel_id is not None:
                 try:
                     await bot.ban_chat_member(
                         chat_id=materials_channel_id,

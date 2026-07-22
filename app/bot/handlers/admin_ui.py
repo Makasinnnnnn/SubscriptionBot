@@ -654,6 +654,14 @@ async def grant_days_received(message: Message, state: FSMContext) -> None:
         )
         await session.commit()
     await state.clear()
+    if invite.materials_link:
+        try:
+            await message.bot.send_message(
+                data["telegram_id"],
+                f"Доступ к методичкам:\n{invite.materials_link}",
+            )
+        except TelegramAPIError:
+            pass
     try:
         await message.bot.send_message(
             data["telegram_id"],

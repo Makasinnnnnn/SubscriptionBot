@@ -427,6 +427,14 @@ async def admin_grant(message: Message) -> None:
             {"telegram_id": telegram_id, "channel_id": channel_id, "days": days},
         )
         await session.commit()
+        if invite.materials_link:
+            try:
+                await message.bot.send_message(
+                    telegram_id,
+                    f"Доступ к методичкам:\n{invite.materials_link}",
+                )
+            except TelegramAPIError:
+                delivery = " Методички: отправка не удалась."
         try:
             await message.bot.send_message(
                 telegram_id,
@@ -737,6 +745,8 @@ async def admin_extend(message: Message) -> None:
             {"days": days},
         )
         await session.commit()
+        if invite.materials_link:
+            await message.answer(f"Доступ к методичкам:\n{invite.materials_link}")
         await message.answer(
             f"Подписка продлена до {_format_dt(subscription.expires_at)}.\n{invite.link}"
         )

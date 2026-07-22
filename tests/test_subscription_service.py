@@ -55,7 +55,28 @@ async def test_manual_grant_extends_existing_subscription(session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manual_revoke_removes_member_and_marks_cancelled(session) -> None:
+async def test_manual_grant_creates_materials_invite(session, monkeypatch) -> None:
+    primary = Channel(telegram_chat_id=-1001, title="Deals")
+    session.add(primary)
+    await session.flush()
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=-1002),
+    )
+    bot = FakeBot()
+    subscription, invite = await SubscriptionService(session).grant_manual(500, primary.id, 10, bot)
+
+    assert invite.materials_channel_id == -1002
+    assert invite.materials_link.startswith("https://t.me/+")
+    assert (-1002, f"materials-sub-{subscription.id}", 1) in bot.invites
+
+
+@pytest.mark.asyncio
+async def test_manual_revoke_removes_member_and_marks_cancelled(session, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=None),
+    )
     channel = Channel(telegram_chat_id=-1001, title="Deals")
     session.add(channel)
     await session.flush()
@@ -73,7 +94,11 @@ async def test_manual_revoke_removes_member_and_marks_cancelled(session) -> None
 
 
 @pytest.mark.asyncio
-async def test_expiration_removes_member_and_notifies(session) -> None:
+async def test_expiration_removes_member_and_notifies(session, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=None),
+    )
     channel = Channel(telegram_chat_id=-1001, title="Deals")
     user = User(telegram_id=500)
     session.add_all([channel, user])
