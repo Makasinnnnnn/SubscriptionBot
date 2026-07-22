@@ -1,5 +1,8 @@
 # PropGate deployment
 
+Пошаговое подключение `propgate.ru`, HTTPS и постоянного Crypto Pay webhook описано в
+[`DOMAIN_SETUP.md`](DOMAIN_SETUP.md).
+
 ## Production prerequisites
 
 - Linux VPS with Docker Engine and Docker Compose;

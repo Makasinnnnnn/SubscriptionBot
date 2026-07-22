@@ -1,6 +1,7 @@
 # PropGate Subscription Bot
 
 Production deployment, backup, update and rollback: [DEPLOYMENT.md](DEPLOYMENT.md).
+Domain, HTTPS and permanent Crypto Pay webhook: [DOMAIN_SETUP.md](DOMAIN_SETUP.md).
 Repeatable local acceptance: [LOCAL_ACCEPTANCE.md](LOCAL_ACCEPTANCE.md).
 
 Telegram-бот для продажи и ручной выдачи доступа к закрытым каналам. Проект использует FastAPI, aiogram 3, PostgreSQL, SQLAlchemy 2, Alembic, APScheduler и Docker Compose.
