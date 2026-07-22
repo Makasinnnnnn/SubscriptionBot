@@ -1,3 +1,4 @@
+import html
 import logging
 from datetime import UTC, datetime
 
@@ -65,7 +66,12 @@ class AdminNotificationService:
                         if ops_bot_token
                         else text
                     )
-                    await notification_bot.send_message(telegram_id, message_text[:4000])
+                    await notification_bot.send_message(
+                        telegram_id,
+                        message_text[:4000],
+                        parse_mode="HTML" if ops_bot_token else None,
+                        disable_notification=category == "system",
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Admin notification failed category=%s event=%s error=%s",
@@ -182,6 +188,9 @@ class AdminNotificationService:
 async def notify_runtime(bot: Bot | None, component: str, event: str, detail: str = "") -> None:
     from app.db.session import async_session_factory
 
+    # Routine container restarts are visible in Docker/systemd; keep them out of the ops chat.
+    if not detail and component.lower() in {"api", "bot", "scheduler"}:
+        return
     try:
         async with async_session_factory() as session:
             text = f"Сервис {component}: {event}."
@@ -241,3 +250,22 @@ def _runtime_component(text: str) -> str:
     if text.startswith(prefix):
         return text[len(prefix):].split(":", maxsplit=1)[0].upper()
     return "UNKNOWN"
+
+
+def _format_ops_notification(category: str, event: str, text: str) -> str:
+    """Render one compact, Telegram-safe operations message."""
+    titles = {
+        "payments": "PAYMENT",
+        "subscriptions": "ACCESS",
+        "refunds": "REFUND",
+        "errors": "ALERT",
+        "system": "SYSTEM",
+    }
+    now = datetime.now(UTC)
+    return "\n".join(
+        [
+            f"<b>PROP GATE · {titles.get(category, 'LOG')}</b>",
+            f"<code>{html.escape(event)}</code> · {now:%Y-%m-%d %H:%M:%S} UTC",
+            html.escape(text),
+        ]
+    )
