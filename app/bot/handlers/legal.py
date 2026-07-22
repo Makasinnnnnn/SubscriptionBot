@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -82,7 +83,7 @@ async def legal_review(callback: CallbackQuery) -> None:
 
 @router.message(Command("support"))
 async def support(message: Message) -> None:
-    contacts = _support_targets()
+    contacts = await _support_targets(message.bot)
     await message.answer(
         "Выберите контакт поддержки:" if contacts else "Контакт поддержки пока не настроен.",
         reply_markup=_support_keyboard(contacts) if contacts else None,
@@ -91,7 +92,7 @@ async def support(message: Message) -> None:
 
 @router.message(Command("paysupport"))
 async def payment_support(message: Message) -> None:
-    contacts = _support_targets()
+    contacts = await _support_targets(message.bot)
     contact = ", ".join(label for label, _ in contacts) or "не настроен"
     await message.answer(
         f"Поддержка по платежам: {contact}\n\n"
@@ -101,15 +102,20 @@ async def payment_support(message: Message) -> None:
     )
 
 
-def _support_targets() -> list[tuple[str, str]]:
+async def _support_targets(bot: Bot) -> list[tuple[str, str]]:
     settings = get_settings()
-    if settings.support_ids:
-        return [
-            (f"Поддержка {index}", f"tg://user?id={telegram_id}")
-            for index, telegram_id in enumerate(settings.support_ids, start=1)
-        ]
-    raw_contacts = settings.support_contacts or [settings.support_contact]
     contacts: list[tuple[str, str]] = []
+    for telegram_id in settings.support_ids:
+        try:
+            chat = await bot.get_chat(telegram_id)
+        except TelegramAPIError:
+            continue
+        if chat.username:
+            target = (f"@{chat.username}", f"https://t.me/{chat.username}")
+            if target not in contacts:
+                contacts.append(target)
+
+    raw_contacts = settings.support_contacts or [settings.support_contact]
     for raw in raw_contacts:
         for value in raw.replace(";", ",").split(","):
             username = value.strip().lstrip("@")
