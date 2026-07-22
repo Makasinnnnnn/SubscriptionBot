@@ -93,7 +93,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.00"
+          cpus: "0.75"
           memory: 1G
     logging: *logging
 
