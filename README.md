@@ -2,6 +2,7 @@
 
 Production deployment, backup, update and rollback: [DEPLOYMENT.md](DEPLOYMENT.md).
 Domain, HTTPS and permanent Crypto Pay webhook: [DOMAIN_SETUP.md](DOMAIN_SETUP.md).
+Backups, monitoring and SSH hardening: [SERVER_OPERATIONS.md](SERVER_OPERATIONS.md).
 Repeatable local acceptance: [LOCAL_ACCEPTANCE.md](LOCAL_ACCEPTANCE.md).
 
 Telegram-бот для продажи и ручной выдачи доступа к закрытым каналам. Проект использует FastAPI, aiogram 3, PostgreSQL, SQLAlchemy 2, Alembic, APScheduler и Docker Compose.
@@ -271,10 +272,13 @@ YOOKASSA_ALLOWED_IPS=["185.71.76.0/27","185.71.77.0/27","77.75.153.0/25","77.75.
 
 Важно: Telegram требует использовать Stars для цифровых товаров и услуг, продаваемых внутри Telegram-приложений. Перед production нужно принять продуктовое решение, как сочетать Stars с внешней оплатой на отдельном сайте и соблюдать правила Telegram и применимое законодательство.
 
-Команды `/terms`, `/support` и `/paysupport` используют:
+Команды `/terms`, `/privacy`, `/refund_policy`, `/support` и `/paysupport` работают внутри
+Telegram. Для Telegram-only документов URL можно оставить пустыми:
 
 ```env
-TERMS_URL=https://propgate.ru/terms
+TERMS_URL=
+PRIVACY_URL=
+REFUND_POLICY_URL=
 SUPPORT_CONTACT=@your_support
 ```
 

@@ -2,6 +2,8 @@
 
 Пошаговое подключение `propgate.ru`, HTTPS и постоянного Crypto Pay webhook описано в
 [`DOMAIN_SETUP.md`](DOMAIN_SETUP.md).
+Ежедневные backup, monitoring и безопасная настройка SSH описаны в
+[`SERVER_OPERATIONS.md`](SERVER_OPERATIONS.md).
 
 ## Production prerequisites
 

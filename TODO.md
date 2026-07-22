@@ -6,18 +6,16 @@
 - Real invite links and Telegram member removal.
 - Real Crypto Pay invoice, webhook and access delivery with a minimal payment.
 - YooKassa only if that provider is enabled later.
-- DNS and HTTPS for `propgate.ru` after choosing a VPS.
-- Repeat backup/restore verification after deployment on the production server.
+- Verify the installed backup timer and offsite destination on the production server.
 
 ## Перед production
 
-- Настроить постоянный HTTPS deployment для `propgate.ru`.
 - Выполнить минимальный реальный платёж Crypto Pay и проверить полный цикл.
 - Подключать ЮKassa только после отдельного продуктового решения.
 - Принять решение по Telegram Stars и внешним платежам с учётом правил Telegram для цифровых услуг.
-- Опубликовать условия использования, политику возвратов и контакт поддержки.
-- Настроить резервные копии PostgreSQL и проверку восстановления.
-- Подключить внешний error monitoring и uptime monitoring.
+- Проверить Telegram-only условия, политику возвратов и контакт поддержки.
+- Указать offsite-назначение для автоматических резервных копий.
+- Создать внешний uptime monitor для `/health` и `/health/db`.
 - Сменить все локальные/тестовые пароли и webhook secret на длинные случайные значения.
 - Отключить `ENABLE_DEV_PAYMENTS`.
 
