@@ -420,7 +420,10 @@ class SubscriptionService:
         subscription: Subscription,
         bot: Bot | None,
     ) -> str | None:
-        channel_id = get_settings().materials_channel_id
+        channel_id = await RuntimeSettingsService(self.session).get(
+            RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+            get_settings().materials_channel_id,
+        )
         if bot is None or channel_id is None:
             return None
         invite_link = subscription.invite_link
@@ -515,7 +518,10 @@ class SubscriptionService:
             materials_channel_id = (
                 subscription.invite_link.materials_channel_id
                 if subscription.invite_link and subscription.invite_link.materials_channel_id
-                else get_settings().materials_channel_id
+                else await RuntimeSettingsService(self.session).get(
+                    RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+                    get_settings().materials_channel_id,
+                )
             )
             if (
                 materials_channel_id is not None

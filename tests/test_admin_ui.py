@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.bot.handlers import admin_ui
+from app.bot.handlers.channels import _part_int
 from app.bot.handlers.admin_ui import (
     _plan_field_value,
     _positive_int,
@@ -13,6 +14,16 @@ from app.bot.handlers.admin_ui import (
     _star_amount,
 )
 from app.db.models import User
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("chan:view:12", 12), ("chan:view:x", None), (None, None)],
+)
+def test_channel_callback_ids_are_strictly_parsed(
+    value: str | None, expected: int | None
+) -> None:
+    assert _part_int(value, 2) == expected
 
 
 def test_price_accepts_comma_and_rounds_to_cents() -> None:

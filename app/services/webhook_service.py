@@ -67,6 +67,12 @@ class WebhookService:
             event.error = "payment_not_found"
             await self.session.commit()
             return {"status": "payment_not_found"}
+        if provider_name == "cryptobot":
+            invoice_payload = (payload.get("payload") or {}).get("payload")
+            if invoice_payload is not None and str(invoice_payload) != str(payment.id):
+                event.error = "invoice_payment_mismatch"
+                await self.session.commit()
+                return {"status": "rejected"}
         if payment.amount != result.amount or payment.currency.upper() != result.currency.upper():
             event.error = "amount_or_currency_mismatch"
             await self.session.commit()

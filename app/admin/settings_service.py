@@ -10,6 +10,7 @@ class RuntimeSettingsService:
     NOTIFICATION_DAYS = "notification_days"
     INVITE_TTL_MINUTES = "invite_ttl_minutes"
     SCHEDULER_INTERVAL_MINUTES = "scheduler_interval_minutes"
+    MATERIALS_CHANNEL_ID = "materials_channel_id"
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session

@@ -6,6 +6,7 @@ from aiogram.types import BotCommand
 
 from app.bot.handlers.admin import router as admin_router
 from app.bot.handlers.admin_ui import router as admin_ui_router
+from app.bot.handlers.channels import router as channels_router
 from app.bot.handlers.identity import router as identity_router
 from app.bot.handlers.legal import router as legal_router
 from app.bot.handlers.start import router as start_router
@@ -28,6 +29,7 @@ async def run_bot() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(identity_router)
     dispatcher.include_router(legal_router)
+    dispatcher.include_router(channels_router)
     dispatcher.include_router(admin_ui_router)
     dispatcher.include_router(admin_router)
     dispatcher.include_router(start_router)
