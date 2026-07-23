@@ -205,6 +205,88 @@ async def channel_check(callback: CallbackQuery) -> None:
     await callback.answer("Бот администратор и имеет права на приглашения и удаление.", show_alert=True)
 
 
+@router.callback_query(F.data == "chan:checkall")
+async def channels_check_all(callback: CallbackQuery) -> None:
+    if not await _can_manage(callback):
+        return
+    async with async_session_factory() as session:
+        primary_channels = list(
+            await session.scalars(
+                select(Channel)
+                .join(Plan)
+                .where(
+                    Channel.is_active.is_(True),
+                    Plan.is_active.is_(True),
+                )
+                .distinct()
+                .order_by(Channel.title)
+            )
+        )
+        materials_chat_id = await RuntimeSettingsService(session).get(
+            RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+            None,
+        )
+        materials_channel = (
+            None
+            if materials_chat_id is None
+            else await session.scalar(
+                select(Channel).where(
+                    Channel.telegram_chat_id == int(materials_chat_id)
+                )
+            )
+        )
+
+    lines = ["Проверка каналов PropGate", ""]
+    if not primary_channels:
+        lines.append("Основной канал: не найден активный канал с тарифом.")
+    for channel in primary_channels:
+        lines.append(
+            await _channel_readiness_line(
+                callback,
+                f"Основной канал ({channel.title})",
+                channel.telegram_chat_id,
+            )
+        )
+    if materials_chat_id is None:
+        lines.append("Методички: канал не настроен.")
+    else:
+        title = materials_channel.title if materials_channel else str(materials_chat_id)
+        lines.append(
+            await _channel_readiness_line(
+                callback,
+                f"Методички ({title})",
+                int(materials_chat_id),
+            )
+        )
+    await callback.answer()
+    await _edit(
+        callback,
+        "\n".join(lines),
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Назад",
+                        callback_data="admin:channels",
+                    )
+                ]
+            ]
+        ),
+    )
+
+
+async def _channel_readiness_line(
+    callback: CallbackQuery,
+    label: str,
+    chat_id: int,
+) -> str:
+    try:
+        await _verify_channel(callback, chat_id)
+    except ChannelVerificationError as exc:
+        return f"{label}: ошибка — {exc}"
+    return f"{label}: готов."
+
+
 @router.callback_query(F.data == "chan:materials")
 async def materials_menu(callback: CallbackQuery) -> None:
     if not await _can_manage(callback):
@@ -279,6 +361,7 @@ async def _show_channels(callback: CallbackQuery) -> None:
     rows.extend([
         [InlineKeyboardButton(text="Добавить канал", callback_data="chan:add")],
         [InlineKeyboardButton(text=f"Методички: {'настроены' if current else 'не настроены'}", callback_data="chan:materials")],
+        [InlineKeyboardButton(text="Проверить оба канала", callback_data="chan:checkall")],
         [InlineKeyboardButton(text="В меню", callback_data="admin:menu")],
     ])
     await _edit(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows))

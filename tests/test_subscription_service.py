@@ -5,9 +5,12 @@ import pytest
 
 from decimal import Decimal
 
+from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramBadRequest
+
 from app.db.enums import PaymentStatus, SubscriptionStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User
-from app.subscriptions.service import SubscriptionService
+from app.subscriptions.service import ChannelAccessError, SubscriptionService
 
 
 class FakeBot:
@@ -17,6 +20,8 @@ class FakeBot:
         self.messages: list[tuple[int, str]] = []
         self.invites: list[tuple[int, str, bool]] = []
         self.revoked_invites: list[tuple[int, str]] = []
+        self.fail_invite_for_chat: int | None = None
+        self.denied_chat: int | None = None
 
     async def create_chat_invite_link(
         self,
@@ -25,8 +30,20 @@ class FakeBot:
         expire_date,
         creates_join_request,
     ):
+        if chat_id == self.fail_invite_for_chat:
+            raise TelegramBadRequest(method=None, message="invite creation failed")
         self.invites.append((chat_id, name, creates_join_request))
         return SimpleNamespace(invite_link=f"https://t.me/+{name}-{len(self.invites)}")
+
+    async def get_me(self):
+        return SimpleNamespace(id=999)
+
+    async def get_chat_member(self, chat_id, user_id):
+        return SimpleNamespace(
+            status=ChatMemberStatus.ADMINISTRATOR,
+            can_invite_users=chat_id != self.denied_chat,
+            can_restrict_members=True,
+        )
 
     async def ban_chat_member(self, chat_id, user_id):
         self.banned.append((chat_id, user_id))
@@ -93,6 +110,82 @@ async def test_refresh_invite_is_rate_limited(session, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="недавно"):
         await service.refresh_invite(subscription.id, bot)
+
+
+@pytest.mark.asyncio
+async def test_legacy_links_bypass_refresh_rate_limit(session, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=-1002),
+    )
+    channel = Channel(telegram_chat_id=-1001, title="Deals")
+    session.add(channel)
+    await session.flush()
+    bot = FakeBot()
+    service = SubscriptionService(session)
+    subscription, invite = await service.grant_manual(500, channel.id, 10, bot)
+    invite.primary_join_request_enabled = False
+    invite.materials_join_request_enabled = False
+    invite.updated_at = datetime.now(UTC).replace(tzinfo=None)
+
+    _, refreshed = await service.refresh_invite(subscription.id, bot)
+
+    assert refreshed.primary_join_request_enabled
+    assert refreshed.materials_join_request_enabled
+    assert len(bot.invites) == 4
+
+
+@pytest.mark.asyncio
+async def test_failed_new_invite_keeps_previous_link(session, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=None),
+    )
+    monkeypatch.setattr(
+        "app.services.admin_notification_service.get_settings",
+        lambda: SimpleNamespace(ops_bot_token="", ops_chat_ids=[], admin_ids=[]),
+    )
+    channel = Channel(telegram_chat_id=-1001, title="Deals")
+    session.add(channel)
+    await session.flush()
+    bot = FakeBot()
+    service = SubscriptionService(session)
+    subscription, invite = await service.grant_manual(500, channel.id, 10, bot)
+    previous_link = invite.link
+    invite.updated_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=6)
+    bot.fail_invite_for_chat = -1001
+
+    with pytest.raises(TelegramBadRequest):
+        await service.refresh_invite(subscription.id, bot)
+
+    assert invite.link == previous_link
+    assert (-1001, previous_link) not in bot.revoked_invites
+
+
+@pytest.mark.asyncio
+async def test_materials_permissions_are_checked_before_creating_any_link(
+    session,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=-1002),
+    )
+    channel = Channel(telegram_chat_id=-1001, title="Deals")
+    session.add(channel)
+    await session.flush()
+    bot = FakeBot()
+    bot.denied_chat = -1002
+
+    with pytest.raises(ChannelAccessError, match="cannot invite"):
+        await SubscriptionService(session).grant_manual(
+            500,
+            channel.id,
+            10,
+            bot,
+        )
+
+    assert bot.invites == []
 
 
 @pytest.mark.asyncio

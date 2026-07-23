@@ -36,6 +36,7 @@ from app.payments.providers import ProviderAPIError, ProviderNotConfiguredError
 from app.payments.registry import get_payment_provider
 from app.services.payment_service import PaymentService, set_status_timestamp
 from app.subscriptions.service import SubscriptionService
+from app.subscriptions.presentation import access_delivery_text
 
 router = Router()
 
@@ -431,10 +432,10 @@ async def admin_grant(message: Message) -> None:
             try:
                 await message.bot.send_message(
                     telegram_id,
-                    (
-                        f"Доступ выдан до {_format_dt(subscription.expires_at)}.\n\n"
-                        f"Основной канал:\n{invite.link}\n\n"
-                        f"Методички:\n{invite.materials_link}"
+                    access_delivery_text(
+                        expires_at=subscription.expires_at,
+                        primary_link=invite.link,
+                        materials_link=invite.materials_link,
                     ),
                 )
             except TelegramAPIError:
@@ -752,10 +753,12 @@ async def admin_extend(message: Message) -> None:
             {"days": days},
         )
         await session.commit()
-        if invite.materials_link:
-            await message.answer(f"Доступ к методичкам:\n{invite.materials_link}")
         await message.answer(
-            f"Подписка продлена до {_format_dt(subscription.expires_at)}.\n{invite.link}"
+            access_delivery_text(
+                expires_at=subscription.expires_at,
+                primary_link=invite.link,
+                materials_link=invite.materials_link,
+            )
         )
 
 
@@ -780,16 +783,13 @@ async def admin_resend_invite(message: Message) -> None:
             return
         await _audit(session, message, "invite.refresh", "subscription", subscription.id)
         await session.commit()
-        if invite.materials_link:
-            await message.answer(
-                (
-                    f"Доступ до {_format_dt(subscription.expires_at)}.\n\n"
-                    f"Основной канал:\n{invite.link}\n\n"
-                    f"Методички:\n{invite.materials_link}"
-                )
+        await message.answer(
+            access_delivery_text(
+                expires_at=subscription.expires_at,
+                primary_link=invite.link,
+                materials_link=invite.materials_link,
             )
-            return
-        await message.answer(f"Новая одноразовая ссылка:\n{invite.link}")
+        )
 
 
 @router.message(Command("admin_check_channel"))

@@ -1,5 +1,4 @@
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import F, Router
@@ -31,95 +30,106 @@ from app.payments.providers import ProviderAPIError, ProviderNotConfiguredError
 from app.services.payment_service import PaymentService
 from app.services.legal_service import LegalAcceptanceRequiredError, LegalService
 from app.services.admin_notification_service import AdminNotificationService
+from app.subscriptions.join_requests import JoinRequestService
+from app.subscriptions.presentation import access_delivery_text
 from app.subscriptions.service import SubscriptionService
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 
-async def _join_request_is_allowed(
-    session: AsyncSession,
-    *,
-    telegram_id: int,
-    chat_id: int,
-    invite_value: str,
-) -> bool:
-    now = datetime.now(UTC).replace(tzinfo=None)
-    user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
-    if user is None:
-        return False
-
-    subscriptions = list(
-        await session.scalars(
-            select(Subscription)
-            .options(
-                selectinload(Subscription.channel),
-                selectinload(Subscription.invite_link),
-            )
-            .where(
-                Subscription.user_id == user.id,
-                Subscription.status == SubscriptionStatus.ACTIVE,
-                Subscription.expires_at > now,
-            )
-        )
-    )
-    primary_allowed = any(
-        item.channel.telegram_chat_id == chat_id
-        and item.invite_link is not None
-        and item.invite_link.link == invite_value
-        and not item.invite_link.is_revoked
-        for item in subscriptions
-    )
-    if primary_allowed:
-        return True
-
-    return any(
-        item.invite_link is not None
-        and item.invite_link.materials_channel_id == chat_id
-        and item.invite_link.materials_link == invite_value
-        and not item.invite_link.materials_is_revoked
-        for item in subscriptions
-    )
-
-
 @router.chat_join_request()
 async def handle_paid_join_request(request: ChatJoinRequest) -> None:
     invite_value = request.invite_link.invite_link if request.invite_link else None
+    logger.info(
+        "event=join_request.received chat_id=%s telegram_id=%s has_invite=%s",
+        request.chat.id,
+        request.from_user.id,
+        invite_value is not None,
+    )
     if not invite_value:
-        await request.bot.decline_chat_join_request(
-            chat_id=request.chat.id,
-            user_id=request.from_user.id,
+        logger.warning(
+            "event=join_request.no_invite chat_id=%s telegram_id=%s",
+            request.chat.id,
+            request.from_user.id,
         )
+        await _decline_join_request(request)
         return
 
     async with async_session_factory() as session:
-        allowed = await _join_request_is_allowed(
-            session,
+        decision = await JoinRequestService(session).decide(
             telegram_id=request.from_user.id,
             chat_id=request.chat.id,
             invite_value=invite_value,
         )
 
-    if allowed:
+    if decision.allowed:
         logger.info(
-            "Join request approved chat_id=%s telegram_id=%s",
+            "event=join_request.approved chat_id=%s telegram_id=%s "
+            "subscription_id=%s access_kind=%s",
             request.chat.id,
             request.from_user.id,
+            decision.subscription_id,
+            decision.access_kind,
         )
-        await request.bot.approve_chat_join_request(
+        try:
+            await request.bot.approve_chat_join_request(
+                chat_id=request.chat.id,
+                user_id=request.from_user.id,
+            )
+        except TelegramAPIError as exc:
+            await _report_join_request_api_failure(request, "approve", exc)
+        return
+
+    logger.warning(
+        "event=join_request.declined chat_id=%s telegram_id=%s "
+        "subscription_id=%s access_kind=%s reason=%s",
+        request.chat.id,
+        request.from_user.id,
+        decision.subscription_id,
+        decision.access_kind,
+        decision.reason,
+    )
+    logger.warning(
+        "event=join_request.%s chat_id=%s telegram_id=%s subscription_id=%s",
+        decision.reason,
+        request.chat.id,
+        request.from_user.id,
+        decision.subscription_id,
+    )
+    await _decline_join_request(request)
+
+
+async def _decline_join_request(request: ChatJoinRequest) -> None:
+    try:
+        await request.bot.decline_chat_join_request(
             chat_id=request.chat.id,
             user_id=request.from_user.id,
         )
-        return
-    logger.warning(
-        "Join request declined chat_id=%s telegram_id=%s",
+    except TelegramAPIError as exc:
+        await _report_join_request_api_failure(request, "decline", exc)
+
+
+async def _report_join_request_api_failure(
+    request: ChatJoinRequest,
+    action: str,
+    exc: TelegramAPIError,
+) -> None:
+    logger.exception(
+        "event=join_request.telegram_failed action=%s chat_id=%s telegram_id=%s error=%s",
+        action,
         request.chat.id,
         request.from_user.id,
+        type(exc).__name__,
     )
-    await request.bot.decline_chat_join_request(
-        chat_id=request.chat.id,
-        user_id=request.from_user.id,
-    )
+    async with async_session_factory() as session:
+        await AdminNotificationService(session, request.bot).notify(
+            "errors",
+            "join_request.telegram_failed",
+            f"Telegram не выполнил {action} для заявки в канал {request.chat.id}.",
+            f"{action}:{request.chat.id}:{request.from_user.id}",
+        )
+        await session.commit()
 
 
 async def send_main_menu(message: Message) -> None:
@@ -374,9 +384,11 @@ async def confirm_dev_payment(callback: CallbackQuery) -> None:
 
     await callback.message.edit_text(
         "Тестовая оплата подтверждена.\n\n"
-        f"Доступ активен до {subscription.expires_at.strftime('%d.%m.%Y %H:%M')}.\n"
-        f"Основной канал: {invite.link}"
-        + _materials_delivery_suffix(materials_invite),
+        + access_delivery_text(
+            expires_at=subscription.expires_at,
+            primary_link=invite.link,
+            materials_link=materials_invite,
+        ),
         reply_markup=main_menu_keyboard(),
     )
 
@@ -473,14 +485,13 @@ async def renew_access_links(callback: CallbackQuery) -> None:
 
     lines = ["Новые ссылки для активных подписок:", ""]
     for subscription, invite in refreshed:
-        lines.extend(
-            [
-                f"{subscription.channel.title} (до {subscription.expires_at:%d.%m.%Y %H:%M})",
-                f"Основной канал: {invite.link}",
-            ]
+        lines.append(
+            access_delivery_text(
+                expires_at=subscription.expires_at,
+                primary_link=invite.link,
+                materials_link=invite.materials_link,
+            )
         )
-        if invite.materials_link:
-            lines.append(f"Методички: {invite.materials_link}")
         lines.append("")
     await callback.message.edit_text("\n".join(lines).strip(), reply_markup=_subscriptions_menu_keyboard())
 
@@ -533,9 +544,11 @@ async def payment_status(callback: CallbackQuery) -> None:
             await session.commit()
             await callback.message.edit_text(
                 "Оплата подтверждена.\n\n"
-                f"Доступ активен до {subscription.expires_at.strftime('%d.%m.%Y %H:%M')}.\n"
-                f"Основной канал: {invite.link}"
-                + _materials_delivery_suffix(materials_invite),
+                + access_delivery_text(
+                    expires_at=subscription.expires_at,
+                    primary_link=invite.link,
+                    materials_link=materials_invite,
+                ),
                 reply_markup=main_menu_keyboard(),
             )
             return
@@ -625,7 +638,7 @@ async def telegram_stars_successful_payment(message: Message) -> None:
             subscription, invite, materials_invite = await SubscriptionService(
                 session
             ).activate_from_payment(payment, message.bot)
-        except TelegramAPIError as exc:
+        except (TelegramAPIError, ValueError) as exc:
             await session.commit()
             logger.warning(
                 "Stars access provisioning failed payment_id=%s error=%s",
@@ -657,9 +670,11 @@ async def telegram_stars_successful_payment(message: Message) -> None:
 
     await message.answer(
         "Оплата в Telegram Stars прошла успешно.\n\n"
-        f"Доступ активен до {subscription.expires_at.strftime('%d.%m.%Y %H:%M')}.\n"
-        f"Основной канал: {invite.link}"
-        + _materials_delivery_suffix(materials_invite),
+        + access_delivery_text(
+            expires_at=subscription.expires_at,
+            primary_link=invite.link,
+            materials_link=materials_invite,
+        ),
         reply_markup=main_menu_keyboard(),
     )
 
@@ -715,14 +730,6 @@ def _stars_payment_id(payload: str) -> int:
     if prefix != "payment" or not separator:
         raise ValueError("Invalid Telegram Stars invoice payload")
     return int(value)
-
-
-def _materials_delivery_suffix(materials_invite: str | None) -> str:
-    if materials_invite:
-        return f"\nМетодички: {materials_invite}"
-    if get_settings().materials_channel_id is not None:
-        return "\nМетодички: ссылка временно недоступна, поддержка уже уведомлена."
-    return ""
 
 
 def _stars_provider_payload(successful: Any) -> dict[str, object]:

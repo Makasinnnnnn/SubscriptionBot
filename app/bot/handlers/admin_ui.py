@@ -19,6 +19,7 @@ from app.db.enums import PaymentStatus, SubscriptionStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User
 from app.db.session import async_session_factory
 from app.subscriptions.service import SubscriptionService
+from app.subscriptions.presentation import access_delivery_text
 from app.services.admin_notification_service import (
     AdminNotificationService,
     NOTIFICATION_CATEGORIES,
@@ -658,10 +659,10 @@ async def grant_days_received(message: Message, state: FSMContext) -> None:
         try:
             await message.bot.send_message(
                 data["telegram_id"],
-                (
-                    f"Доступ выдан до {subscription.expires_at:%d.%m.%Y %H:%M}.\n\n"
-                    f"Основной канал:\n{invite.link}\n\n"
-                    f"Методички:\n{invite.materials_link}"
+                access_delivery_text(
+                    expires_at=subscription.expires_at,
+                    primary_link=invite.link,
+                    materials_link=invite.materials_link,
                 ),
             )
         except TelegramAPIError:

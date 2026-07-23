@@ -18,14 +18,7 @@ from app.services.admin_notification_service import notify_runtime
 logger = logging.getLogger(__name__)
 
 
-async def run_bot() -> None:
-    setup_logging()
-    settings = get_settings()
-    if not settings.bot_token:
-        raise RuntimeError("BOT_TOKEN is required to run the bot")
-
-    bot = Bot(token=settings.bot_token)
-    await _configure_bot_profile(bot)
+def build_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.include_router(identity_router)
     dispatcher.include_router(legal_router)
@@ -34,9 +27,28 @@ async def run_bot() -> None:
     dispatcher.include_router(admin_router)
     dispatcher.include_router(start_router)
     dispatcher.include_router(subscriptions_router)
+    return dispatcher
+
+
+def polling_update_types(dispatcher: Dispatcher) -> list[str]:
+    return dispatcher.resolve_used_update_types()
+
+
+async def run_bot() -> None:
+    setup_logging()
+    settings = get_settings()
+    if not settings.bot_token:
+        raise RuntimeError("BOT_TOKEN is required to run the bot")
+
+    bot = Bot(token=settings.bot_token)
+    await _configure_bot_profile(bot)
+    dispatcher = build_dispatcher()
     await notify_runtime(bot, "bot", "запущен")
     try:
-        await dispatcher.start_polling(bot)
+        await dispatcher.start_polling(
+            bot,
+            allowed_updates=polling_update_types(dispatcher),
+        )
     finally:
         await notify_runtime(bot, "bot", "остановлен")
         await bot.session.close()

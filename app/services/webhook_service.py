@@ -14,7 +14,8 @@ from app.db.models import Payment, Plan, User, WebhookEvent
 from app.payments.registry import get_payment_provider
 from app.services.payment_service import set_status_timestamp
 from app.services.admin_notification_service import AdminNotificationService
-from app.subscriptions.service import SubscriptionService
+from app.subscriptions.presentation import access_delivery_text
+from app.subscriptions.service import ChannelAccessError, SubscriptionService
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,7 @@ class WebhookService:
             provision_failed = False
             try:
                 await self._activate_and_notify(payment)
-            except TelegramAPIError as exc:
+            except (TelegramAPIError, ChannelAccessError) as exc:
                 provision_failed = True
                 event.error = "access_provision_failed"
                 logger.warning(
@@ -155,11 +156,11 @@ class WebhookService:
                 try:
                     await bot.send_message(
                         user.telegram_id,
-                        (
-                            "Оплата прошла успешно.\n\n"
-                            f"Доступ активен до {subscription.expires_at.strftime('%d.%m.%Y %H:%M')}.\n"
-                            f"Основной канал: {invite.link}"
-                            + self._materials_delivery_suffix(materials_invite)
+                        "Оплата прошла успешно.\n\n"
+                        + access_delivery_text(
+                            expires_at=subscription.expires_at,
+                            primary_link=invite.link,
+                            materials_link=materials_invite,
                         ),
                     )
                 except TelegramAPIError as exc:
@@ -242,11 +243,3 @@ class WebhookService:
             )
         finally:
             await bot.session.close()
-
-    @staticmethod
-    def _materials_delivery_suffix(materials_invite: str | None) -> str:
-        if materials_invite:
-            return f"\nМетодички: {materials_invite}"
-        if get_settings().materials_channel_id is not None:
-            return "\nМетодички: ссылка временно недоступна, поддержка уже уведомлена."
-        return ""

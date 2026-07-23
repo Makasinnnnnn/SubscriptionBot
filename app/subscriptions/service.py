@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
+from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +33,10 @@ class AccessChangeResult:
     error: str | None = None
 
 
+class ChannelAccessError(ValueError):
+    pass
+
+
 class SubscriptionService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -58,12 +63,11 @@ class SubscriptionService:
                 raise ValueError("Payment subscription has already been revoked")
             payment.status = PaymentStatus.PAID
             payment.paid_at = payment.paid_at or _utcnow()
-            invite_link = await self._create_or_refresh_invite(
+            invite_link, materials_invite = await self._provision_access_links(
                 existing_for_payment,
                 existing_for_payment.channel,
                 bot,
             )
-            materials_invite = await self._create_materials_invite(existing_for_payment, bot)
             return existing_for_payment, invite_link, materials_invite
 
         plan = await self.session.get(Plan, payment.plan_id, options=[selectinload(Plan.channel)])
@@ -93,14 +97,9 @@ class SubscriptionService:
         payment.paid_at = payment.paid_at or now
         await self.session.flush()
 
-        invite_link = await self._create_or_refresh_invite(
+        invite_link, materials_invite = await self._provision_access_links(
             subscription,
             plan.channel,
-            bot,
-            force_new=True,
-        )
-        materials_invite = await self._create_materials_invite(
-            subscription,
             bot,
             force_new=True,
         )
@@ -159,8 +158,12 @@ class SubscriptionService:
         subscription.source = "manual"
         await self.session.flush()
 
-        invite_link = await self._create_or_refresh_invite(subscription, channel, bot, force_new=True)
-        await self._create_materials_invite(subscription, bot, force_new=True)
+        invite_link, _ = await self._provision_access_links(
+            subscription,
+            channel,
+            bot,
+            force_new=True,
+        )
         await self._notify_admins(
             bot,
             "subscriptions",
@@ -218,8 +221,12 @@ class SubscriptionService:
         subscription.revoke_reason = None
         subscription.source = "manual"
         await self.session.flush()
-        invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot, force_new=True)
-        await self._create_materials_invite(subscription, bot, force_new=True)
+        invite, _ = await self._provision_access_links(
+            subscription,
+            subscription.channel,
+            bot,
+            force_new=True,
+        )
         return subscription, invite
 
     async def refresh_invite(
@@ -239,12 +246,32 @@ class SubscriptionService:
         if subscription is None:
             raise ValueError("Active subscription not found")
         existing_invite = subscription.invite_link
-        if existing_invite is not None:
+        materials_channel_id = await RuntimeSettingsService(self.session).get(
+            RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+            get_settings().materials_channel_id,
+        )
+        join_request_ready = (
+            existing_invite is not None
+            and existing_invite.primary_join_request_enabled
+            and (
+                materials_channel_id is None
+                or (
+                    existing_invite.materials_channel_id == materials_channel_id
+                    and bool(existing_invite.materials_link)
+                    and existing_invite.materials_join_request_enabled
+                )
+            )
+        )
+        if join_request_ready and existing_invite is not None:
             last_refresh = existing_invite.updated_at or existing_invite.created_at
             if last_refresh and _utcnow() - last_refresh < timedelta(minutes=5):
                 raise ValueError("Новые ссылки уже выдавались недавно. Попробуйте через несколько минут.")
-        invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot, force_new=True)
-        await self._create_materials_invite(subscription, bot, force_new=True)
+        invite, _ = await self._provision_access_links(
+            subscription,
+            subscription.channel,
+            bot,
+            force_new=True,
+        )
         return subscription, invite
 
     async def revoke_user(
@@ -375,6 +402,106 @@ class SubscriptionService:
             .with_for_update()
         )
 
+    async def _provision_access_links(
+        self,
+        subscription: Subscription,
+        channel: Channel,
+        bot: Bot | None,
+        force_new: bool = False,
+    ) -> tuple[InviteLink, str | None]:
+        existing = await self.session.scalar(
+            select(InviteLink).where(
+                InviteLink.subscription_id == subscription.id
+            )
+        )
+        previous_primary_link = (
+            existing.link
+            if existing is not None and existing.link and not existing.is_revoked
+            else None
+        )
+        previous_materials_link = (
+            existing.materials_link
+            if (
+                existing is not None
+                and existing.materials_link
+                and not existing.materials_is_revoked
+            )
+            else None
+        )
+        previous_materials_channel_id = (
+            existing.materials_channel_id if existing is not None else None
+        )
+        if bot is not None:
+            try:
+                await self._ensure_bot_channel_permissions(
+                    bot,
+                    channel.telegram_chat_id,
+                )
+                materials_channel_id = await RuntimeSettingsService(self.session).get(
+                    RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+                    get_settings().materials_channel_id,
+                )
+                if materials_channel_id is not None:
+                    await self._ensure_bot_channel_permissions(
+                        bot,
+                        int(materials_channel_id),
+                    )
+            except ChannelAccessError as exc:
+                logger.exception(
+                    "event=invite.creation_failed kind=preflight "
+                    "subscription_id=%s channel_id=%s error=%s",
+                    subscription.id,
+                    channel.telegram_chat_id,
+                    type(exc).__name__,
+                )
+                await self._notify_admins(
+                    bot,
+                    "errors",
+                    "invite.creation_failed",
+                    f"Не пройдена проверка прав каналов для подписки #{subscription.id}.",
+                    f"preflight:{subscription.id}",
+                    channel.id,
+                )
+                raise
+        invite = await self._create_or_refresh_invite(
+            subscription,
+            channel,
+            bot,
+            force_new=force_new,
+        )
+        materials = await self._create_materials_invite(
+            subscription,
+            bot,
+            force_new=force_new,
+        )
+        if (
+            bot is not None
+            and previous_primary_link
+            and previous_primary_link != invite.link
+        ):
+            await self._revoke_invite_safely(
+                bot,
+                channel.telegram_chat_id,
+                previous_primary_link,
+                subscription.id,
+                "primary",
+            )
+        if (
+            bot is not None
+            and previous_materials_channel_id is not None
+            and previous_materials_link
+            and materials is not None
+            and previous_materials_link != materials
+        ):
+            await self._revoke_invite_safely(
+                bot,
+                previous_materials_channel_id,
+                previous_materials_link,
+                subscription.id,
+                "materials",
+            )
+        return invite, materials
+
     async def _create_or_refresh_invite(
         self,
         subscription: Subscription,
@@ -390,6 +517,7 @@ class SubscriptionService:
             existing is not None
             and existing.link
             and not existing.is_revoked
+            and existing.primary_join_request_enabled
             and existing.expire_at is not None
             and existing.expire_at > now
         ):
@@ -399,38 +527,33 @@ class SubscriptionService:
         provider_id: str | None = None
         link_value = "tg://join?invite=replace-with-created-link"
         if bot is not None:
-            previous_link = (
-                existing.link
-                if force_new and existing is not None and existing.link and not existing.is_revoked
-                else None
-            )
             provider_id = f"sub-{subscription.id}"
             try:
+                await self._ensure_bot_channel_permissions(bot, channel.telegram_chat_id)
                 invite = await bot.create_chat_invite_link(
                     chat_id=channel.telegram_chat_id,
                     name=provider_id,
                     expire_date=expire_at,
                     creates_join_request=True,
                 )
-            except TelegramAPIError as exc:
+            except (TelegramAPIError, ChannelAccessError) as exc:
+                logger.exception(
+                    "event=invite.creation_failed kind=primary subscription_id=%s "
+                    "channel_id=%s error=%s",
+                    subscription.id,
+                    channel.telegram_chat_id,
+                    type(exc).__name__,
+                )
                 await self._notify_admins(
                     bot,
                     "errors",
-                    "invite.create_failed",
+                    "invite.creation_failed",
                     f"Не удалось создать invite-ссылку для подписки #{subscription.id}: {type(exc).__name__}.",
                     f"subscription:{subscription.id}",
                     channel.id,
                 )
                 raise
             link_value = invite.invite_link
-            if previous_link and previous_link != link_value:
-                await self._revoke_invite_safely(
-                    bot,
-                    channel.telegram_chat_id,
-                    previous_link,
-                    subscription.id,
-                    "primary",
-                )
 
         invite_link = existing
         if invite_link is None:
@@ -441,9 +564,15 @@ class SubscriptionService:
         invite_link.expire_at = expire_at
         invite_link.used_at = None
         invite_link.is_revoked = False
+        invite_link.primary_join_request_enabled = bot is not None
         invite_link.revoked_at = None
         invite_link.provider_invite_link_id = provider_id
         await self.session.flush()
+        logger.info(
+            "event=invite.primary_created subscription_id=%s channel_id=%s",
+            subscription.id,
+            channel.telegram_chat_id,
+        )
         return invite_link
 
     async def _create_materials_invite(
@@ -464,32 +593,26 @@ class SubscriptionService:
             invite_link is not None
             and invite_link.materials_link
             and not invite_link.materials_is_revoked
+            and invite_link.materials_join_request_enabled
+            and invite_link.materials_channel_id == channel_id
             and invite_link.materials_expire_at
             and invite_link.materials_expire_at > now
         ):
             return invite_link.materials_link
         ttl_minutes = await RuntimeSettingsService(self.session).invite_ttl_minutes()
         expire_at = _invite_expiration(now, subscription.expires_at, ttl_minutes)
-        previous_link = (
-            invite_link.materials_link
-            if (
-                force_new
-                and invite_link is not None
-                and invite_link.materials_link
-                and not invite_link.materials_is_revoked
-            )
-            else None
-        )
         try:
+            await self._ensure_bot_channel_permissions(bot, channel_id)
             invite = await bot.create_chat_invite_link(
                 chat_id=channel_id,
                 name=f"materials-sub-{subscription.id}",
                 expire_date=expire_at,
                 creates_join_request=True,
             )
-        except TelegramAPIError as exc:
-            logger.warning(
-                "Materials invite creation failed subscription_id=%s channel_id=%s error=%s",
+        except (TelegramAPIError, ChannelAccessError) as exc:
+            logger.exception(
+                "event=invite.creation_failed kind=materials subscription_id=%s "
+                "channel_id=%s error=%s",
                 subscription.id,
                 channel_id,
                 type(exc).__name__,
@@ -502,24 +625,50 @@ class SubscriptionService:
                 f"subscription:{subscription.id}",
                 subscription.channel_id,
             )
-            return None
+            if (
+                invite_link is not None
+                and invite_link.materials_join_request_enabled
+                and invite_link.materials_channel_id == channel_id
+                and invite_link.materials_link
+                and not invite_link.materials_is_revoked
+                and invite_link.materials_expire_at
+                and invite_link.materials_expire_at > now
+            ):
+                return invite_link.materials_link
+            raise
         if invite_link is None:
             raise RuntimeError("Primary invite link is missing")
-        if previous_link and previous_link != invite.invite_link:
-            await self._revoke_invite_safely(
-                bot,
-                channel_id,
-                previous_link,
-                subscription.id,
-                "materials",
-            )
         invite_link.materials_channel_id = channel_id
         invite_link.materials_link = invite.invite_link
         invite_link.materials_expire_at = expire_at
         invite_link.materials_is_revoked = False
+        invite_link.materials_join_request_enabled = True
         invite_link.materials_revoked_at = None
         await self.session.flush()
+        logger.info(
+            "event=invite.materials_created subscription_id=%s channel_id=%s",
+            subscription.id,
+            channel_id,
+        )
         return invite.invite_link
+
+    @staticmethod
+    async def _ensure_bot_channel_permissions(bot: Bot, chat_id: int) -> None:
+        try:
+            bot_user = await bot.get_me()
+            member = await bot.get_chat_member(chat_id, bot_user.id)
+        except TelegramAPIError as exc:
+            raise ChannelAccessError(
+                f"Bot cannot inspect channel {chat_id}"
+            ) from exc
+        if member.status == ChatMemberStatus.CREATOR:
+            return
+        if member.status != ChatMemberStatus.ADMINISTRATOR:
+            raise ChannelAccessError(f"Bot is not an administrator of channel {chat_id}")
+        if not getattr(member, "can_invite_users", False):
+            raise ChannelAccessError(f"Bot cannot invite users to channel {chat_id}")
+        if not getattr(member, "can_restrict_members", False):
+            raise ChannelAccessError(f"Bot cannot restrict members in channel {chat_id}")
 
     @staticmethod
     async def _revoke_invite_safely(
@@ -721,5 +870,5 @@ def _utcnow() -> datetime:
 
 def _invite_expiration(now: datetime, subscription_expiration: datetime, ttl_minutes: int) -> datetime:
     configured = now + timedelta(minutes=ttl_minutes)
-    # Keep one-time links usable for the subscription lifetime, capped by Telegram's limit.
+    # Keep join-request links usable for the subscription lifetime, capped by Telegram's limit.
     return min(max(configured, subscription_expiration), now + timedelta(days=366))
