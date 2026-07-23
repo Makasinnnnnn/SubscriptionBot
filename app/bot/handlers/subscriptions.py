@@ -3,7 +3,7 @@ from typing import Any
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import CallbackQuery, InlineKeyboardButton, LabeledPrice, Message, PreCheckoutQuery
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -323,7 +323,73 @@ async def my_subscriptions(callback: CallbackQuery) -> None:
         f"{subscription.expires_at.strftime('%d.%m.%Y %H:%M')}"
         for subscription in subscriptions
     )
-    await callback.message.edit_text("\n".join(lines), reply_markup=main_menu_keyboard())
+    await callback.message.edit_text("\n".join(lines), reply_markup=_subscriptions_menu_keyboard())
+
+
+def _subscriptions_menu_keyboard():
+    keyboard = main_menu_keyboard()
+    keyboard.inline_keyboard.insert(
+        2,
+        [InlineKeyboardButton(text="Получить доступ снова", callback_data="subs:renew")],
+    )
+    return keyboard
+
+
+@router.callback_query(F.data == "subs:renew")
+async def renew_access_links(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+
+    async with async_session_factory() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
+        if user is None:
+            await callback.message.edit_text("Активных подписок пока нет.", reply_markup=main_menu_keyboard())
+            return
+        subscriptions = list(
+            await session.scalars(
+                select(Subscription)
+                .options(selectinload(Subscription.channel), selectinload(Subscription.invite_link))
+                .where(
+                    Subscription.user_id == user.id,
+                    Subscription.status == SubscriptionStatus.ACTIVE,
+                )
+                .order_by(Subscription.expires_at.desc())
+            )
+        )
+        if not subscriptions:
+            await callback.message.edit_text("Активных подписок пока нет.", reply_markup=main_menu_keyboard())
+            return
+        refreshed: list[tuple[Subscription, Any]] = []
+        try:
+            for subscription in subscriptions:
+                _, invite = await SubscriptionService(session).refresh_invite(
+                    subscription.id,
+                    callback.bot,
+                )
+                refreshed.append((subscription, invite))
+            await session.commit()
+        except (TelegramAPIError, ValueError) as exc:
+            await session.rollback()
+            logger.warning("Access link refresh failed user_id=%s error=%s", user.id, type(exc).__name__)
+            await callback.message.edit_text(
+                "Не удалось создать новые ссылки. Поддержка уже уведомлена.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
+
+    lines = ["Новые ссылки для активных подписок:", ""]
+    for subscription, invite in refreshed:
+        lines.extend(
+            [
+                f"{subscription.channel.title} (до {subscription.expires_at:%d.%m.%Y %H:%M})",
+                f"Основной канал: {invite.link}",
+            ]
+        )
+        if invite.materials_link:
+            lines.append(f"Методички: {invite.materials_link}")
+        lines.append("")
+    await callback.message.edit_text("\n".join(lines).strip(), reply_markup=_subscriptions_menu_keyboard())
 
 
 @router.callback_query(F.data.startswith("payments:status:"))

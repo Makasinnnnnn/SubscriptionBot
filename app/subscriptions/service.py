@@ -229,6 +229,11 @@ class SubscriptionService:
         )
         if subscription is None:
             raise ValueError("Active subscription not found")
+        existing_invite = subscription.invite_link
+        if existing_invite is not None:
+            last_refresh = existing_invite.updated_at or existing_invite.created_at
+            if last_refresh and _utcnow() - last_refresh < timedelta(minutes=5):
+                raise ValueError("Новые ссылки уже выдавались недавно. Попробуйте через несколько минут.")
         invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot, force_new=True)
         await self._create_materials_invite(subscription, bot, force_new=True)
         return subscription, invite

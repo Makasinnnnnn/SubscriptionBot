@@ -72,6 +72,24 @@ async def test_manual_grant_creates_materials_invite(session, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_refresh_invite_is_rate_limited(session, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=None),
+    )
+    channel = Channel(telegram_chat_id=-1001, title="Deals")
+    session.add(channel)
+    await session.flush()
+    bot = FakeBot()
+    service = SubscriptionService(session)
+    subscription, invite = await service.grant_manual(500, channel.id, 10, bot)
+    invite.updated_at = datetime.now(UTC).replace(tzinfo=None)
+
+    with pytest.raises(ValueError, match="недавно"):
+        await service.refresh_invite(subscription.id, bot)
+
+
+@pytest.mark.asyncio
 async def test_manual_revoke_removes_member_and_marks_cancelled(session, monkeypatch) -> None:
     monkeypatch.setattr(
         "app.subscriptions.service.get_settings",
