@@ -658,10 +658,17 @@ async def grant_days_received(message: Message, state: FSMContext) -> None:
         try:
             await message.bot.send_message(
                 data["telegram_id"],
-                f"Доступ к методичкам:\n{invite.materials_link}",
+                (
+                    f"Доступ выдан до {subscription.expires_at:%d.%m.%Y %H:%M}.\n\n"
+                    f"Основной канал:\n{invite.link}\n\n"
+                    f"Методички:\n{invite.materials_link}"
+                ),
             )
         except TelegramAPIError:
-            pass
+            await message.answer("Не удалось отправить ссылки пользователю.", reply_markup=admin_menu_keyboard())
+        else:
+            await message.answer("Доступ к обоим каналам выдан и отправлен одним сообщением.", reply_markup=admin_menu_keyboard())
+        return
     try:
         await message.bot.send_message(
             data["telegram_id"],

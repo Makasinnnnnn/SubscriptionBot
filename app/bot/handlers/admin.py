@@ -431,10 +431,17 @@ async def admin_grant(message: Message) -> None:
             try:
                 await message.bot.send_message(
                     telegram_id,
-                    f"Доступ к методичкам:\n{invite.materials_link}",
+                    (
+                        f"Доступ выдан до {_format_dt(subscription.expires_at)}.\n\n"
+                        f"Основной канал:\n{invite.link}\n\n"
+                        f"Методички:\n{invite.materials_link}"
+                    ),
                 )
             except TelegramAPIError:
                 delivery = " Методички: отправка не удалась."
+            else:
+                await message.answer("Доступ к обоим каналам выдан и отправлен одним сообщением.")
+            return
         try:
             await message.bot.send_message(
                 telegram_id,
@@ -773,6 +780,15 @@ async def admin_resend_invite(message: Message) -> None:
             return
         await _audit(session, message, "invite.refresh", "subscription", subscription.id)
         await session.commit()
+        if invite.materials_link:
+            await message.answer(
+                (
+                    f"Доступ до {_format_dt(subscription.expires_at)}.\n\n"
+                    f"Основной канал:\n{invite.link}\n\n"
+                    f"Методички:\n{invite.materials_link}"
+                )
+            )
+            return
         await message.answer(f"Новая одноразовая ссылка:\n{invite.link}")
 
 

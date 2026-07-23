@@ -150,8 +150,8 @@ class SubscriptionService:
         subscription.source = "manual"
         await self.session.flush()
 
-        invite_link = await self._create_or_refresh_invite(subscription, channel, bot)
-        await self._create_materials_invite(subscription, bot)
+        invite_link = await self._create_or_refresh_invite(subscription, channel, bot, force_new=True)
+        await self._create_materials_invite(subscription, bot, force_new=True)
         await self._notify_admins(
             bot,
             "subscriptions",
@@ -209,8 +209,8 @@ class SubscriptionService:
         subscription.revoke_reason = None
         subscription.source = "manual"
         await self.session.flush()
-        invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot)
-        await self._create_materials_invite(subscription, bot)
+        invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot, force_new=True)
+        await self._create_materials_invite(subscription, bot, force_new=True)
         return subscription, invite
 
     async def refresh_invite(
@@ -229,8 +229,8 @@ class SubscriptionService:
         )
         if subscription is None:
             raise ValueError("Active subscription not found")
-        invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot)
-        await self._create_materials_invite(subscription, bot)
+        invite = await self._create_or_refresh_invite(subscription, subscription.channel, bot, force_new=True)
+        await self._create_materials_invite(subscription, bot, force_new=True)
         return subscription, invite
 
     async def revoke_user(
@@ -366,12 +366,13 @@ class SubscriptionService:
         subscription: Subscription,
         channel: Channel,
         bot: Bot | None,
+        force_new: bool = False,
     ) -> InviteLink:
         now = _utcnow()
         existing = await self.session.scalar(
             select(InviteLink).where(InviteLink.subscription_id == subscription.id)
         )
-        if (
+        if not force_new and (
             existing is not None
             and existing.link
             and not existing.is_revoked
@@ -380,7 +381,7 @@ class SubscriptionService:
         ):
             return existing
         ttl_minutes = await RuntimeSettingsService(self.session).invite_ttl_minutes()
-        expire_at = now + timedelta(minutes=ttl_minutes)
+        expire_at = _invite_expiration(now, subscription.expires_at, ttl_minutes)
         provider_id: str | None = None
         link_value = "tg://join?invite=replace-with-created-link"
         if bot is not None:
@@ -422,6 +423,7 @@ class SubscriptionService:
         self,
         subscription: Subscription,
         bot: Bot | None,
+        force_new: bool = False,
     ) -> str | None:
         channel_id = await RuntimeSettingsService(self.session).get(
             RuntimeSettingsService.MATERIALS_CHANNEL_ID,
@@ -431,7 +433,7 @@ class SubscriptionService:
             return None
         invite_link = subscription.invite_link
         now = _utcnow()
-        if (
+        if not force_new and (
             invite_link is not None
             and invite_link.materials_link
             and not invite_link.materials_is_revoked
@@ -440,7 +442,7 @@ class SubscriptionService:
         ):
             return invite_link.materials_link
         ttl_minutes = await RuntimeSettingsService(self.session).invite_ttl_minutes()
-        expire_at = now + timedelta(minutes=ttl_minutes)
+        expire_at = _invite_expiration(now, subscription.expires_at, ttl_minutes)
         try:
             invite = await bot.create_chat_invite_link(
                 chat_id=channel_id,
@@ -652,3 +654,9 @@ class SubscriptionService:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _invite_expiration(now: datetime, subscription_expiration: datetime, ttl_minutes: int) -> datetime:
+    configured = now + timedelta(minutes=ttl_minutes)
+    # Keep one-time links usable for the subscription lifetime, capped by Telegram's limit.
+    return min(max(configured, subscription_expiration), now + timedelta(days=366))
