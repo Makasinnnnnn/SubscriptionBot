@@ -26,7 +26,7 @@ class FakeBot:
         creates_join_request,
     ):
         self.invites.append((chat_id, name, creates_join_request))
-        return SimpleNamespace(invite_link=f"https://t.me/+{name}")
+        return SimpleNamespace(invite_link=f"https://t.me/+{name}-{len(self.invites)}")
 
     async def ban_chat_member(self, chat_id, user_id):
         self.banned.append((chat_id, user_id))
@@ -261,6 +261,8 @@ async def test_new_payment_refreshes_used_links_for_active_subscription(
     bot = FakeBot()
     service = SubscriptionService(session)
     subscription, primary, materials = await service.activate_from_payment(first_payment, bot)
+    first_primary_link = primary.link
+    first_materials_link = materials
 
     second_payment = Payment(
         user_id=user.id,
@@ -278,5 +280,5 @@ async def test_new_payment_refreshes_used_links_for_active_subscription(
 
     assert renewed.id == subscription.id
     assert len(bot.invites) == 4
-    assert (-1001, primary.link) in bot.revoked_invites
-    assert (materials_chat_id, materials) in bot.revoked_invites
+    assert (-1001, first_primary_link) in bot.revoked_invites
+    assert (materials_chat_id, first_materials_link) in bot.revoked_invites

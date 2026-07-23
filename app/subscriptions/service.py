@@ -399,14 +399,11 @@ class SubscriptionService:
         provider_id: str | None = None
         link_value = "tg://join?invite=replace-with-created-link"
         if bot is not None:
-            if force_new and existing is not None and existing.link and not existing.is_revoked:
-                await self._revoke_invite_safely(
-                    bot,
-                    channel.telegram_chat_id,
-                    existing.link,
-                    subscription.id,
-                    "primary",
-                )
+            previous_link = (
+                existing.link
+                if force_new and existing is not None and existing.link and not existing.is_revoked
+                else None
+            )
             provider_id = f"sub-{subscription.id}"
             try:
                 invite = await bot.create_chat_invite_link(
@@ -426,6 +423,14 @@ class SubscriptionService:
                 )
                 raise
             link_value = invite.invite_link
+            if previous_link and previous_link != link_value:
+                await self._revoke_invite_safely(
+                    bot,
+                    channel.telegram_chat_id,
+                    previous_link,
+                    subscription.id,
+                    "primary",
+                )
 
         invite_link = existing
         if invite_link is None:
@@ -465,19 +470,16 @@ class SubscriptionService:
             return invite_link.materials_link
         ttl_minutes = await RuntimeSettingsService(self.session).invite_ttl_minutes()
         expire_at = _invite_expiration(now, subscription.expires_at, ttl_minutes)
-        if (
-            force_new
-            and invite_link is not None
-            and invite_link.materials_link
-            and not invite_link.materials_is_revoked
-        ):
-            await self._revoke_invite_safely(
-                bot,
-                channel_id,
-                invite_link.materials_link,
-                subscription.id,
-                "materials",
+        previous_link = (
+            invite_link.materials_link
+            if (
+                force_new
+                and invite_link is not None
+                and invite_link.materials_link
+                and not invite_link.materials_is_revoked
             )
+            else None
+        )
         try:
             invite = await bot.create_chat_invite_link(
                 chat_id=channel_id,
@@ -503,6 +505,14 @@ class SubscriptionService:
             return None
         if invite_link is None:
             raise RuntimeError("Primary invite link is missing")
+        if previous_link and previous_link != invite.invite_link:
+            await self._revoke_invite_safely(
+                bot,
+                channel_id,
+                previous_link,
+                subscription.id,
+                "materials",
+            )
         invite_link.materials_channel_id = channel_id
         invite_link.materials_link = invite.invite_link
         invite_link.materials_expire_at = expire_at

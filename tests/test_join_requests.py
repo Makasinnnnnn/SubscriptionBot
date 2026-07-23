@@ -8,12 +8,8 @@ from app.db.models import Channel, InviteLink, Subscription, User
 
 
 @pytest.mark.asyncio
-async def test_active_subscriber_can_join_both_channels(session, monkeypatch) -> None:
+async def test_active_subscriber_can_join_both_channels(session) -> None:
     materials_chat_id = -1002
-    monkeypatch.setattr(
-        "app.bot.handlers.subscriptions.get_settings",
-        lambda: type("Settings", (), {"materials_channel_id": materials_chat_id})(),
-    )
     user = User(telegram_id=500)
     channel = Channel(telegram_chat_id=-1001, title="Deals")
     session.add_all([user, channel])
@@ -55,12 +51,8 @@ async def test_active_subscriber_can_join_both_channels(session, monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_join_request_rejects_shared_or_expired_access(session, monkeypatch) -> None:
+async def test_join_request_rejects_shared_or_expired_access(session) -> None:
     materials_chat_id = -1002
-    monkeypatch.setattr(
-        "app.bot.handlers.subscriptions.get_settings",
-        lambda: type("Settings", (), {"materials_channel_id": materials_chat_id})(),
-    )
     subscriber = User(telegram_id=500)
     outsider = User(telegram_id=501)
     channel = Channel(telegram_chat_id=-1001, title="Deals")

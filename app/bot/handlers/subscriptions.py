@@ -23,7 +23,6 @@ from app.bot.keyboards.subscription import (
     payment_providers_keyboard,
     plans_keyboard,
 )
-from app.admin.settings_service import RuntimeSettingsService
 from app.core.config import get_settings
 from app.db.enums import PaymentStatus, SubscriptionStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User
@@ -74,13 +73,9 @@ async def _join_request_is_allowed(
     if primary_allowed:
         return True
 
-    materials_channel_id = await RuntimeSettingsService(session).get(
-        RuntimeSettingsService.MATERIALS_CHANNEL_ID,
-        get_settings().materials_channel_id,
-    )
-    return chat_id == materials_channel_id and any(
+    return any(
         item.invite_link is not None
-        and item.invite_link.materials_channel_id == materials_channel_id
+        and item.invite_link.materials_channel_id == chat_id
         and item.invite_link.materials_link == invite_value
         and not item.invite_link.materials_is_revoked
         for item in subscriptions
@@ -106,11 +101,21 @@ async def handle_paid_join_request(request: ChatJoinRequest) -> None:
         )
 
     if allowed:
+        logger.info(
+            "Join request approved chat_id=%s telegram_id=%s",
+            request.chat.id,
+            request.from_user.id,
+        )
         await request.bot.approve_chat_join_request(
             chat_id=request.chat.id,
             user_id=request.from_user.id,
         )
         return
+    logger.warning(
+        "Join request declined chat_id=%s telegram_id=%s",
+        request.chat.id,
+        request.from_user.id,
+    )
     await request.bot.decline_chat_join_request(
         chat_id=request.chat.id,
         user_id=request.from_user.id,
