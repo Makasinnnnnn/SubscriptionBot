@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.admin.settings_service import RuntimeSettingsService
 from app.bot.keyboards.subscription import (
     main_menu_keyboard,
     legal_acceptance_keyboard,
@@ -174,19 +175,51 @@ async def help_menu(callback: CallbackQuery) -> None:
     )
 
 
+async def _materials_channel_id(session: AsyncSession) -> int | None:
+    value = await RuntimeSettingsService(session).get(
+        RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+        get_settings().materials_channel_id,
+    )
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid materials channel id in runtime settings")
+        return None
+
+
+async def _available_plans(session: AsyncSession) -> list[Plan]:
+    statement = (
+        select(Plan)
+        .join(Plan.channel)
+        .options(selectinload(Plan.channel))
+        .where(Channel.is_active.is_(True), Plan.is_active.is_(True))
+        .order_by(Channel.title, Plan.price)
+    )
+    materials_channel_id = await _materials_channel_id(session)
+    if materials_channel_id is not None:
+        statement = statement.where(
+            Channel.telegram_chat_id != materials_channel_id
+        )
+    return list(await session.scalars(statement))
+
+
+async def _plan_is_available(
+    session: AsyncSession,
+    plan: Plan | None,
+) -> bool:
+    if plan is None or not plan.is_active or not plan.channel.is_active:
+        return False
+    materials_channel_id = await _materials_channel_id(session)
+    return plan.channel.telegram_chat_id != materials_channel_id
+
+
 @router.callback_query(F.data == "plans:list")
 async def list_plans(callback: CallbackQuery) -> None:
     await callback.answer()
     async with async_session_factory() as session:
-        plans = list(
-            await session.scalars(
-                select(Plan)
-                .join(Plan.channel)
-                .options(selectinload(Plan.channel))
-                .where(Channel.is_active.is_(True), Plan.is_active.is_(True))
-                .order_by(Channel.title, Plan.price)
-            )
-        )
+        plans = await _available_plans(session)
 
     if not callback.message:
         return
@@ -215,10 +248,12 @@ async def select_plan(callback: CallbackQuery) -> None:
 
     async with async_session_factory() as session:
         plan = await session.get(Plan, plan_id, options=[selectinload(Plan.channel)])
-
-    if plan is None or not plan.is_active or not plan.channel.is_active:
-        await callback.message.edit_text("Тариф недоступен.", reply_markup=main_menu_keyboard())
-        return
+        if not await _plan_is_available(session, plan):
+            await callback.message.edit_text(
+                "Тариф недоступен.",
+                reply_markup=main_menu_keyboard(),
+            )
+            return
     await callback.message.edit_text(
         f"{plan.channel.title}\n\n"
         f"{plan.title}\n"
@@ -280,7 +315,7 @@ async def _create_payment_flow(
     async with async_session_factory() as session:
         user = await _ensure_user_from_callback(callback, session)
         plan = await session.get(Plan, plan_id, options=[selectinload(Plan.channel)])
-        if plan is None or not plan.is_active or not plan.channel.is_active:
+        if not await _plan_is_available(session, plan):
             await callback.message.edit_text("Тариф недоступен.", reply_markup=main_menu_keyboard())
             return
         try:
