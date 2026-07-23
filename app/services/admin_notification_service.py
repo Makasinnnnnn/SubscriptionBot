@@ -41,6 +41,8 @@ class AdminNotificationService:
         ops_bot_token = getattr(settings, "ops_bot_token", "")
         ops_chat_ids = getattr(settings, "ops_chat_ids", [])
         if ops_bot_token:
+            if not _important_ops_event(category, event):
+                return 0
             try:
                 notification_bot = Bot(ops_bot_token)
                 owns_bot = True
@@ -269,3 +271,11 @@ def _format_ops_notification(category: str, event: str, text: str) -> str:
             html.escape(text),
         ]
     )
+
+
+def _important_ops_event(category: str, event: str) -> bool:
+    if category in {"errors", "refunds"}:
+        return True
+    if category == "payments" and event == "payment.paid":
+        return True
+    return event in {"subscription.provision_failed", "materials.invite_failed"}

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     bot_token: str = Field(default="", repr=False)
     ops_bot_token: str = Field(default="", repr=False)
     ops_chat_ids: list[int] = Field(default_factory=list)
+    ops_api_url: str = "http://app:8000"
     admin_ids: list[int] = Field(default_factory=list)
     admin_username: str = "admin"
     admin_password: str = Field(default="", repr=False)

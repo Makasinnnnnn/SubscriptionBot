@@ -71,6 +71,29 @@ services:
           memory: 256M
     logging: *logging
 
+  ops:
+    env_file: !override ${APP_ENV_FILE:-.env.production}
+    environment:
+      APP_MODE: ops
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      OPS_API_URL: http://app:8000
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 192M
+    volumes:
+      - /var/lib/propgate-monitor:/monitor:ro
+    logging: *logging
+
   migrations:
     env_file: !override ${APP_ENV_FILE:-.env.production}
     environment:

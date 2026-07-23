@@ -38,3 +38,12 @@ provider dashboards are configured. The local `dev` provider remains the safe te
 After updating the server bundle, rebuild the bot and app containers. No database
 migration is required for channel management because the runtime materials-channel
 selection uses the existing `app_settings` table.
+
+## Operations bot
+
+Run the dedicated `ops` service when `OPS_BOT_TOKEN` and `OPS_CHAT_IDS` are configured.
+Only listed operations chats and superadmins can open its menu. The bot provides separate
+views for API, Telegram, webhooks, services, access, payments, database state, invite links,
+subscriptions, active users, server failures, and recoveries. User search accepts either a
+Telegram ID or username. Push notifications are reserved for successful payments, refunds,
+and errors; routine events remain available on demand without filling the chat.

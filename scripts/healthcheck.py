@@ -7,6 +7,7 @@ import json
 import os
 import ssl
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -15,6 +16,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(os.environ.get("PROPGATE_ROOT", "/opt/propgate"))
 ENV_FILE = ROOT / ".env.production"
 STATE_FILE = Path(os.environ.get("PROPGATE_MONITOR_STATE", "/var/lib/propgate-monitor/status"))
+EVENTS_FILE = Path(os.environ.get("PROPGATE_MONITOR_EVENTS", "/var/lib/propgate-monitor/events.jsonl"))
 BASE_URL = os.environ.get("MONITOR_BASE_URL", "https://propgate.ru").rstrip("/")
 
 
@@ -74,6 +76,17 @@ def save_state(value: str) -> None:
     STATE_FILE.write_text(f"{value}\n", encoding="ascii")
 
 
+def append_event(status: str, details: str) -> None:
+    EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    event = {
+        "time": datetime.now(UTC).isoformat(),
+        "status": status,
+        "details": details[:500],
+    }
+    with EVENTS_FILE.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, ensure_ascii=True) + "\n")
+
+
 def main() -> int:
     env = read_env()
     previous = load_previous_state()
@@ -98,6 +111,7 @@ def main() -> int:
             parse_chat_ids(env.get("OPS_CHAT_IDS", "")),
             text,
         )
+        append_event(current, details or text)
 
     save_state(current)
     if current == "down":

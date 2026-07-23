@@ -48,7 +48,7 @@ under the permanent `https://propgate.ru` origin.
 curl -fsS https://propgate.ru/health
 curl -fsS https://propgate.ru/health/db
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml ps
-docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml logs --tail 100 app bot scheduler
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml logs --tail 100 app bot scheduler ops
 ```
 
 ## Update and rollback

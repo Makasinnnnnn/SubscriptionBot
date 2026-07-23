@@ -4,7 +4,7 @@
 
 ```powershell
 scripts\test.cmd
-scripts\docker_compose.cmd up -d --build postgres redis migrations app bot scheduler
+scripts\docker_compose.cmd up -d --build postgres redis migrations app bot scheduler ops
 Invoke-RestMethod http://localhost:8000/health
 Invoke-RestMethod http://localhost:8000/health/db
 ```
