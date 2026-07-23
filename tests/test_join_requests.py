@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -233,3 +234,46 @@ async def test_dispatcher_approves_real_join_request_update(
     approve.assert_any_await(chat_id=-1001, user_id=500)
     approve.assert_any_await(chat_id=-1002, user_id=500)
     decline.assert_awaited_once_with(chat_id=-1001, user_id=501)
+
+
+@pytest.mark.asyncio
+async def test_access_refresh_error_survives_database_rollback(
+    session,
+    monkeypatch,
+    caplog,
+) -> None:
+    subscription, _ = await _seed_access(session)
+
+    class SessionContext:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def fail_refresh(_service, subscription_id, bot):
+        assert subscription_id == subscription.id
+        raise ValueError("materials channel permission missing")
+
+    monkeypatch.setattr(
+        subscription_handlers,
+        "async_session_factory",
+        SessionContext,
+    )
+    monkeypatch.setattr(
+        subscription_handlers.SubscriptionService,
+        "refresh_invite",
+        fail_refresh,
+    )
+    message = SimpleNamespace(edit_text=AsyncMock())
+    callback = SimpleNamespace(
+        answer=AsyncMock(),
+        message=message,
+        from_user=SimpleNamespace(id=500),
+        bot=object(),
+    )
+
+    await subscription_handlers.renew_access_links(callback)
+
+    message.edit_text.assert_awaited_once()
+    assert "materials channel permission missing" in caplog.text

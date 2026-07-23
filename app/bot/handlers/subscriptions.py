@@ -475,8 +475,13 @@ async def renew_access_links(callback: CallbackQuery) -> None:
                 refreshed.append((subscription, invite))
             await session.commit()
         except (TelegramAPIError, ValueError) as exc:
+            logger.warning(
+                "Access link refresh failed telegram_id=%s error=%s detail=%s",
+                callback.from_user.id,
+                type(exc).__name__,
+                str(exc)[:300],
+            )
             await session.rollback()
-            logger.warning("Access link refresh failed user_id=%s error=%s", user.id, type(exc).__name__)
             await callback.message.edit_text(
                 "Не удалось создать новые ссылки. Поддержка уже уведомлена.",
                 reply_markup=main_menu_keyboard(),
@@ -529,12 +534,14 @@ async def payment_status(callback: CallbackQuery) -> None:
                     session
                 ).activate_from_payment(payment, callback.bot)
             except (TelegramAPIError, ValueError) as exc:
-                await session.rollback()
                 logger.warning(
-                    "Paid payment access provisioning failed payment_id=%s error=%s",
-                    payment.id,
+                    "Paid payment access provisioning failed payment_id=%s "
+                    "error=%s detail=%s",
+                    payment_id,
                     type(exc).__name__,
+                    str(exc)[:300],
                 )
+                await session.rollback()
                 await callback.message.edit_text(
                     "Оплата подтверждена, но Telegram пока не выдал ссылку. "
                     "Поддержка уведомлена; повторите проверку позже.",
