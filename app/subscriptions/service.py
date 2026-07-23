@@ -413,7 +413,7 @@ class SubscriptionService:
                     chat_id=channel.telegram_chat_id,
                     name=provider_id,
                     expire_date=expire_at,
-                    member_limit=1,
+                    creates_join_request=True,
                 )
             except TelegramAPIError as exc:
                 await self._notify_admins(
@@ -483,7 +483,7 @@ class SubscriptionService:
                 chat_id=channel_id,
                 name=f"materials-sub-{subscription.id}",
                 expire_date=expire_at,
-                member_limit=1,
+                creates_join_request=True,
             )
         except TelegramAPIError as exc:
             logger.warning(

@@ -1,9 +1,17 @@
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import CallbackQuery, InlineKeyboardButton, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import (
+    CallbackQuery,
+    ChatJoinRequest,
+    InlineKeyboardButton,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -15,6 +23,7 @@ from app.bot.keyboards.subscription import (
     payment_providers_keyboard,
     plans_keyboard,
 )
+from app.admin.settings_service import RuntimeSettingsService
 from app.core.config import get_settings
 from app.db.enums import PaymentStatus, SubscriptionStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User
@@ -27,6 +36,85 @@ from app.subscriptions.service import SubscriptionService
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+async def _join_request_is_allowed(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    chat_id: int,
+    invite_value: str,
+) -> bool:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+    if user is None:
+        return False
+
+    subscriptions = list(
+        await session.scalars(
+            select(Subscription)
+            .options(
+                selectinload(Subscription.channel),
+                selectinload(Subscription.invite_link),
+            )
+            .where(
+                Subscription.user_id == user.id,
+                Subscription.status == SubscriptionStatus.ACTIVE,
+                Subscription.expires_at > now,
+            )
+        )
+    )
+    primary_allowed = any(
+        item.channel.telegram_chat_id == chat_id
+        and item.invite_link is not None
+        and item.invite_link.link == invite_value
+        and not item.invite_link.is_revoked
+        for item in subscriptions
+    )
+    if primary_allowed:
+        return True
+
+    materials_channel_id = await RuntimeSettingsService(session).get(
+        RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+        get_settings().materials_channel_id,
+    )
+    return chat_id == materials_channel_id and any(
+        item.invite_link is not None
+        and item.invite_link.materials_channel_id == materials_channel_id
+        and item.invite_link.materials_link == invite_value
+        and not item.invite_link.materials_is_revoked
+        for item in subscriptions
+    )
+
+
+@router.chat_join_request()
+async def handle_paid_join_request(request: ChatJoinRequest) -> None:
+    invite_value = request.invite_link.invite_link if request.invite_link else None
+    if not invite_value:
+        await request.bot.decline_chat_join_request(
+            chat_id=request.chat.id,
+            user_id=request.from_user.id,
+        )
+        return
+
+    async with async_session_factory() as session:
+        allowed = await _join_request_is_allowed(
+            session,
+            telegram_id=request.from_user.id,
+            chat_id=request.chat.id,
+            invite_value=invite_value,
+        )
+
+    if allowed:
+        await request.bot.approve_chat_join_request(
+            chat_id=request.chat.id,
+            user_id=request.from_user.id,
+        )
+        return
+    await request.bot.decline_chat_join_request(
+        chat_id=request.chat.id,
+        user_id=request.from_user.id,
+    )
 
 
 async def send_main_menu(message: Message) -> None:

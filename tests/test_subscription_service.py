@@ -15,11 +15,17 @@ class FakeBot:
         self.banned: list[tuple[int, int]] = []
         self.unbanned: list[tuple[int, int]] = []
         self.messages: list[tuple[int, str]] = []
-        self.invites: list[tuple[int, str, int]] = []
+        self.invites: list[tuple[int, str, bool]] = []
         self.revoked_invites: list[tuple[int, str]] = []
 
-    async def create_chat_invite_link(self, chat_id, name, expire_date, member_limit):
-        self.invites.append((chat_id, name, member_limit))
+    async def create_chat_invite_link(
+        self,
+        chat_id,
+        name,
+        expire_date,
+        creates_join_request,
+    ):
+        self.invites.append((chat_id, name, creates_join_request))
         return SimpleNamespace(invite_link=f"https://t.me/+{name}")
 
     async def ban_chat_member(self, chat_id, user_id):
@@ -68,7 +74,7 @@ async def test_manual_grant_creates_materials_invite(session, monkeypatch) -> No
 
     assert invite.materials_channel_id == -1002
     assert invite.materials_link.startswith("https://t.me/+")
-    assert (-1002, f"materials-sub-{subscription.id}", 1) in bot.invites
+    assert (-1002, f"materials-sub-{subscription.id}", True) in bot.invites
 
 
 @pytest.mark.asyncio
@@ -196,8 +202,8 @@ async def test_paid_subscription_uses_and_revokes_both_channels(
     assert repeated_primary.link == primary.link
     assert repeated_materials == materials
     assert bot.invites == [
-        (-1001, f"sub-{subscription.id}", 1),
-        (materials_chat_id, f"materials-sub-{subscription.id}", 1),
+        (-1001, f"sub-{subscription.id}", True),
+        (materials_chat_id, f"materials-sub-{subscription.id}", True),
     ]
     assert primary.materials_link == materials
     assert primary.materials_channel_id == materials_chat_id
