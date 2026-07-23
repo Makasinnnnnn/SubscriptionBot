@@ -211,3 +211,66 @@ async def test_paid_subscription_uses_and_revokes_both_channels(
     assert (materials_chat_id, materials) in bot.revoked_invites
     assert primary.is_revoked
     assert primary.materials_is_revoked
+
+
+@pytest.mark.asyncio
+async def test_new_payment_refreshes_used_links_for_active_subscription(
+    session,
+    monkeypatch,
+) -> None:
+    materials_chat_id = -1002
+    monkeypatch.setattr(
+        "app.subscriptions.service.get_settings",
+        lambda: SimpleNamespace(materials_channel_id=materials_chat_id),
+    )
+    monkeypatch.setattr(
+        "app.services.admin_notification_service.get_settings",
+        lambda: SimpleNamespace(ops_bot_token="", ops_chat_ids=[], admin_ids=[]),
+    )
+    user = User(telegram_id=500)
+    channel = Channel(telegram_chat_id=-1001, title="Deals")
+    session.add_all([user, channel])
+    await session.flush()
+    plan = Plan(
+        channel_id=channel.id,
+        title="Month",
+        duration_days=30,
+        price=Decimal("4990"),
+        currency="RUB",
+    )
+    session.add(plan)
+    await session.flush()
+    first_payment = Payment(
+        user_id=user.id,
+        plan_id=plan.id,
+        provider="cryptobot",
+        provider_payment_id="invoice-renew-1",
+        status=PaymentStatus.PAID,
+        amount=Decimal("4990"),
+        currency="RUB",
+        idempotency_key="renew-1",
+    )
+    session.add(first_payment)
+    await session.flush()
+    bot = FakeBot()
+    service = SubscriptionService(session)
+    subscription, primary, materials = await service.activate_from_payment(first_payment, bot)
+
+    second_payment = Payment(
+        user_id=user.id,
+        plan_id=plan.id,
+        provider="cryptobot",
+        provider_payment_id="invoice-renew-2",
+        status=PaymentStatus.PAID,
+        amount=Decimal("4990"),
+        currency="RUB",
+        idempotency_key="renew-2",
+    )
+    session.add(second_payment)
+    await session.flush()
+    renewed, _, _ = await service.activate_from_payment(second_payment, bot)
+
+    assert renewed.id == subscription.id
+    assert len(bot.invites) == 4
+    assert (-1001, primary.link) in bot.revoked_invites
+    assert (materials_chat_id, materials) in bot.revoked_invites

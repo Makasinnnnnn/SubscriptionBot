@@ -93,8 +93,17 @@ class SubscriptionService:
         payment.paid_at = payment.paid_at or now
         await self.session.flush()
 
-        invite_link = await self._create_or_refresh_invite(subscription, plan.channel, bot)
-        materials_invite = await self._create_materials_invite(subscription, bot)
+        invite_link = await self._create_or_refresh_invite(
+            subscription,
+            plan.channel,
+            bot,
+            force_new=True,
+        )
+        materials_invite = await self._create_materials_invite(
+            subscription,
+            bot,
+            force_new=True,
+        )
         await self._notify_admins(
             bot,
             "subscriptions",
@@ -390,6 +399,14 @@ class SubscriptionService:
         provider_id: str | None = None
         link_value = "tg://join?invite=replace-with-created-link"
         if bot is not None:
+            if force_new and existing is not None and existing.link and not existing.is_revoked:
+                await self._revoke_invite_safely(
+                    bot,
+                    channel.telegram_chat_id,
+                    existing.link,
+                    subscription.id,
+                    "primary",
+                )
             provider_id = f"sub-{subscription.id}"
             try:
                 invite = await bot.create_chat_invite_link(
@@ -448,6 +465,19 @@ class SubscriptionService:
             return invite_link.materials_link
         ttl_minutes = await RuntimeSettingsService(self.session).invite_ttl_minutes()
         expire_at = _invite_expiration(now, subscription.expires_at, ttl_minutes)
+        if (
+            force_new
+            and invite_link is not None
+            and invite_link.materials_link
+            and not invite_link.materials_is_revoked
+        ):
+            await self._revoke_invite_safely(
+                bot,
+                channel_id,
+                invite_link.materials_link,
+                subscription.id,
+                "materials",
+            )
         try:
             invite = await bot.create_chat_invite_link(
                 chat_id=channel_id,
@@ -480,6 +510,24 @@ class SubscriptionService:
         invite_link.materials_revoked_at = None
         await self.session.flush()
         return invite.invite_link
+
+    @staticmethod
+    async def _revoke_invite_safely(
+        bot: Bot,
+        chat_id: int,
+        link: str,
+        subscription_id: int,
+        kind: str,
+    ) -> None:
+        try:
+            await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=link)
+        except TelegramAPIError as exc:
+            logger.info(
+                "Old invite revoke skipped subscription_id=%s kind=%s error=%s",
+                subscription_id,
+                kind,
+                type(exc).__name__,
+            )
 
     async def _revoke_loaded(
         self,
