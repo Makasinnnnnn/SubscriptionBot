@@ -194,17 +194,39 @@ class SupportContactService:
                 )
             )
         unique: list[ResolvedSupportContact] = []
-        seen: set[tuple[str, str]] = set()
+        positions: dict[str, int] = {}
         for contact in resolved:
+            # A Telegram ID may resolve to the same public username that is also
+            # configured explicitly. Display that profile only once and retain
+            # the ID-backed definition because it can receive relayed tickets.
             key = (
-                contact.source.kind,
-                contact.url or contact.source.value,
+                contact.url.lower().rstrip("/")
+                if contact.url
+                else f"{contact.source.kind}:{contact.source.value.lower()}"
             )
-            if key in seen:
+            existing_index = positions.get(key)
+            if existing_index is not None:
+                existing = unique[existing_index]
+                if (
+                    existing.source.kind != "telegram_id"
+                    and contact.source.kind == "telegram_id"
+                ):
+                    unique[existing_index] = contact
                 continue
-            seen.add(key)
+            positions[key] = len(unique)
             unique.append(contact)
         return unique
+
+    async def relay_target(self) -> SupportContact | None:
+        """Return the configured Telegram account that receives support tickets."""
+        return next(
+            (
+                contact
+                for contact in await self.definitions()
+                if contact.kind == "telegram_id"
+            ),
+            None,
+        )
 
 
 def _deduplicate(contacts: list[SupportContact]) -> list[SupportContact]:

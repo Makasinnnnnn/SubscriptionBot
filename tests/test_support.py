@@ -39,12 +39,12 @@ def test_support_menu_and_child_screens_have_back_navigation() -> None:
     )
 
 
-def test_numeric_support_contact_uses_bot_relay_button() -> None:
+def test_support_keyboard_has_unique_links_and_one_relay_action() -> None:
     keyboard = _support_keyboard(
         [
             ResolvedSupportContact(
                 label="Support ID",
-                url=None,
+                url="https://t.me/public_support",
                 source=SupportContact(
                     kind="telegram_id",
                     value="101",
@@ -64,9 +64,34 @@ def test_numeric_support_contact_uses_bot_relay_button() -> None:
         back_callback="support:menu",
     )
 
-    assert keyboard.inline_keyboard[0][0].callback_data == "support:write:0"
-    assert keyboard.inline_keyboard[0][0].url is None
-    assert keyboard.inline_keyboard[1][0].url == "https://t.me/public_support"
+    assert keyboard.inline_keyboard[0][0].url == "https://t.me/public_support"
+    assert keyboard.inline_keyboard[1][0].text == "Оставить обращение в поддержку"
+    assert keyboard.inline_keyboard[1][0].callback_data == "support:write"
+
+
+def test_support_keyboard_without_telegram_id_has_no_relay_action() -> None:
+    keyboard = _support_keyboard(
+        [
+            ResolvedSupportContact(
+                label="@public_support",
+                url="https://t.me/public_support",
+                source=SupportContact(
+                    kind="username",
+                    value="public_support",
+                    label="@public_support",
+                ),
+            )
+        ],
+        back_callback="support:menu",
+    )
+
+    callbacks = [
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    assert "support:write" not in callbacks
 
 
 def test_numeric_environment_contact_never_becomes_username() -> None:
@@ -115,6 +140,82 @@ async def test_support_ids_are_resolved_to_public_username_links(
         ("Поддержка", "https://t.me/first_support"),
         ("Поддержка", "https://t.me/second_support"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_support_id_and_matching_username_are_resolved_once(
+    session,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        support_ids=[101],
+        support_contacts=["@public_support"],
+    )
+    monkeypatch.setattr(
+        "app.services.support_service.get_settings",
+        lambda: settings,
+    )
+    bot = SimpleNamespace(
+        get_chat=AsyncMock(
+            return_value=SimpleNamespace(username="public_support")
+        )
+    )
+
+    contacts = await SupportContactService(session).resolved(bot)
+
+    assert len(contacts) == 1
+    assert contacts[0].url == "https://t.me/public_support"
+    assert contacts[0].source.kind == "telegram_id"
+
+
+@pytest.mark.asyncio
+async def test_matching_contact_keeps_relay_capability_regardless_of_order(
+    session,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        support_contacts=["@public_support", "101"],
+    )
+    monkeypatch.setattr(
+        "app.services.support_service.get_settings",
+        lambda: settings,
+    )
+    bot = SimpleNamespace(
+        get_chat=AsyncMock(
+            return_value=SimpleNamespace(username="public_support")
+        )
+    )
+
+    contacts = await SupportContactService(session).resolved(bot)
+
+    assert len(contacts) == 1
+    assert contacts[0].source.kind == "telegram_id"
+
+
+@pytest.mark.asyncio
+async def test_relay_target_prefers_first_telegram_id(
+    session,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        support_contacts=["@public_support", "101", "202"],
+    )
+    monkeypatch.setattr(
+        "app.services.support_service.get_settings",
+        lambda: settings,
+    )
+
+    target = await SupportContactService(session).relay_target()
+
+    assert target is not None
+    assert target.kind == "telegram_id"
+    assert target.value == "101"
 
 
 @pytest.mark.asyncio

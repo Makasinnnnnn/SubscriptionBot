@@ -16,7 +16,11 @@ from app.bot.keyboards.subscription import (
 )
 from app.db.session import async_session_factory
 from app.db.models import AuditLog
-from app.services.support_service import ResolvedSupportContact, SupportContactService
+from app.services.support_service import (
+    ResolvedSupportContact,
+    SupportContact,
+    SupportContactService,
+)
 
 router = Router()
 
@@ -180,35 +184,32 @@ async def support_contacts(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.startswith("support:write:"))
+@router.callback_query(
+    (F.data == "support:write") | F.data.startswith("support:write:")
+)
 async def support_write_start(
     callback: CallbackQuery,
     state: FSMContext,
 ) -> None:
     if callback.message is None:
         return
-    try:
-        contact_index = int((callback.data or "").rsplit(":", 1)[1])
-    except (IndexError, ValueError):
-        await callback.answer("Контакт не найден.", show_alert=True)
-        return
-    contacts = await _support_targets(callback.bot)
-    if not 0 <= contact_index < len(contacts):
-        await callback.answer("Контакт больше не доступен.", show_alert=True)
-        return
-    contact = contacts[contact_index]
-    if contact.source.kind != "telegram_id":
-        await callback.answer("Для этого контакта доступна прямая ссылка.", show_alert=True)
+    await callback.answer()
+    contact = await _support_relay_target()
+    if contact is None:
+        await callback.message.edit_text(
+            "Получатель обращений пока не настроен. "
+            "Используйте прямой контакт поддержки.",
+            reply_markup=_support_back_keyboard(),
+        )
         return
     await state.set_state(SupportMessageForm.message)
     await state.update_data(
-        support_kind=contact.source.kind,
-        support_value=contact.source.value,
+        support_kind=contact.kind,
+        support_value=contact.value,
         support_label=contact.label,
     )
-    await callback.answer()
     await callback.message.edit_text(
-        f"Сообщение для «{contact.label}»\n\n"
+        "Обращение в поддержку\n\n"
         "Напишите одним сообщением, что произошло. Бот передаст текст вместе "
         "с вашим Telegram ID. Не отправляйте пароли, коды или данные карты.",
         reply_markup=_support_back_keyboard(),
@@ -321,28 +322,38 @@ async def _support_targets(bot: Bot) -> list[ResolvedSupportContact]:
         return await SupportContactService(session).resolved(bot)
 
 
+async def _support_relay_target() -> SupportContact | None:
+    async with async_session_factory() as session:
+        return await SupportContactService(session).relay_target()
+
+
 def _support_keyboard(
     contacts: list[ResolvedSupportContact],
     *,
     back_callback: str,
 ) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    seen_urls: set[str] = set()
+    for contact in contacts:
+        if not contact.url:
+            continue
+        normalized_url = contact.url.lower().rstrip("/")
+        if normalized_url in seen_urls:
+            continue
+        seen_urls.add(normalized_url)
+        rows.append([InlineKeyboardButton(text=contact.label, url=contact.url)])
+    if any(contact.source.kind == "telegram_id" for contact in contacts):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Оставить обращение в поддержку",
+                    callback_data="support:write",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="Назад", callback_data=back_callback)])
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            *[
-                [
-                    (
-                        InlineKeyboardButton(text=contact.label, url=contact.url)
-                        if contact.url
-                        else InlineKeyboardButton(
-                            text=contact.label,
-                            callback_data=f"support:write:{index}",
-                        )
-                    )
-                ]
-                for index, contact in enumerate(contacts)
-            ],
-            [InlineKeyboardButton(text="Назад", callback_data=back_callback)],
-        ]
+        inline_keyboard=rows
     )
 
 
