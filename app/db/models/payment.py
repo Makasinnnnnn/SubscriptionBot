@@ -12,6 +12,8 @@ from app.db.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
     from app.db.models.plan import Plan
+    from app.db.models.promo_code import PromoCode
+    from app.db.models.promo_redemption import PromoRedemption
     from app.db.models.subscription import Subscription
     from app.db.models.user import User
 
@@ -29,6 +31,11 @@ class Payment(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id", ondelete="RESTRICT"), index=True)
+    promo_code_id: Mapped[int | None] = mapped_column(
+        ForeignKey("promo_codes.id", ondelete="SET NULL"),
+        default=None,
+        index=True,
+    )
     provider: Mapped[str] = mapped_column(String(64), index=True)
     provider_payment_id: Mapped[str | None] = mapped_column(String(255), default=None)
     status: Mapped[PaymentStatus] = mapped_column(
@@ -51,4 +58,8 @@ class Payment(TimestampMixin, Base):
 
     user: Mapped["User"] = relationship(back_populates="payments")
     plan: Mapped["Plan"] = relationship(back_populates="payments")
+    promo_code: Mapped["PromoCode | None"] = relationship(back_populates="payments")
+    promo_redemption: Mapped["PromoRedemption | None"] = relationship(
+        back_populates="payment",
+    )
     subscription: Mapped["Subscription | None"] = relationship(back_populates="payment")

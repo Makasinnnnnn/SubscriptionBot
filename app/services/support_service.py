@@ -27,7 +27,7 @@ class SupportContact:
 @dataclass(frozen=True)
 class ResolvedSupportContact:
     label: str
-    url: str
+    url: str | None
     source: SupportContact
 
 
@@ -126,10 +126,11 @@ class SupportContactService:
                 )
             except (TypeError, ValueError):
                 continue
-        return sorted(
+        normalized = sorted(
             _deduplicate(contacts),
             key=lambda contact: contact.position,
         )[:MAX_SUPPORT_CONTACTS]
+        return normalized or support_contacts_from_settings(get_settings())
 
     async def save(
         self,
@@ -137,6 +138,8 @@ class SupportContactService:
         actor_telegram_id: int,
     ) -> None:
         normalized = _deduplicate(contacts)
+        if not normalized:
+            raise ValueError("Должен остаться хотя бы один контакт поддержки.")
         if len(normalized) > MAX_SUPPORT_CONTACTS:
             raise ValueError(f"Можно настроить не более {MAX_SUPPORT_CONTACTS} контактов.")
         values = [
@@ -181,7 +184,7 @@ class SupportContactService:
                 url = f"https://t.me/{username}"
                 default_label = f"@{username}"
             else:
-                url = f"tg://user?id={contact.value}"
+                url = None
                 default_label = "Поддержка"
             resolved.append(
                 ResolvedSupportContact(
@@ -191,11 +194,15 @@ class SupportContactService:
                 )
             )
         unique: list[ResolvedSupportContact] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for contact in resolved:
-            if contact.url in seen:
+            key = (
+                contact.source.kind,
+                contact.url or contact.source.value,
+            )
+            if key in seen:
                 continue
-            seen.add(contact.url)
+            seen.add(key)
             unique.append(contact)
         return unique
 

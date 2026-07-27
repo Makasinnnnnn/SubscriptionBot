@@ -13,13 +13,24 @@ from app.db.models import Payment, Plan, User
 from app.payments.base import InvoiceRequest
 from app.payments.registry import get_payment_provider
 from app.services.legal_service import LegalService
+from app.services.promo_service import (
+    PromoService,
+    discounted_amount,
+)
 
 
 class PaymentService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create_payment(self, user: User, plan: Plan, provider_name: str) -> Payment:
+    async def create_payment(
+        self,
+        user: User,
+        plan: Plan,
+        provider_name: str,
+        *,
+        promo_id: int | None = None,
+    ) -> Payment:
         await LegalService(self.session).require(user.id)
         provider = get_payment_provider(provider_name)
         authoritative_plan = await self.session.scalar(
@@ -49,17 +60,35 @@ class PaymentService:
         if is_materials_plan:
             raise ValueError("Service plan is not available for purchase")
         plan = authoritative_plan
-        amount, currency = self._provider_price(plan, provider_name)
+        base_amount, currency = self._provider_price(plan, provider_name)
         # Serialize invoice creation per user so double-clicks cannot create two provider invoices.
         await self.session.scalar(select(User.id).where(User.id == user.id).with_for_update())
         now = datetime.now(UTC).replace(tzinfo=None)
         pending_cutoff = now - timedelta(hours=1)
+        promo = None
+        amount = base_amount
+        if promo_id is not None:
+            promo = await PromoService(self.session).load_for_payment(
+                promo_id=promo_id,
+                plan_id=plan.id,
+                now=now,
+            )
+            amount = discounted_amount(
+                base_amount,
+                currency,
+                promo.discount_percent,
+            )
         existing = await self.session.scalar(
             select(Payment)
             .where(
                 Payment.user_id == user.id,
                 Payment.plan_id == plan.id,
                 Payment.provider == provider_name,
+                (
+                    Payment.promo_code_id == promo.id
+                    if promo is not None
+                    else Payment.promo_code_id.is_(None)
+                ),
                 Payment.status == PaymentStatus.PENDING,
                 Payment.created_at >= pending_cutoff,
             )
@@ -85,15 +114,29 @@ class PaymentService:
         for stale in stale_pending:
             stale.status = PaymentStatus.EXPIRED
             stale.failed_at = stale.failed_at or now
+        if promo is not None:
+            await PromoService(self.session).ensure_capacity(
+                promo,
+                user.id,
+                now,
+            )
         idempotency_key = str(uuid4())
         payment = Payment(
             user_id=user.id,
             plan_id=plan.id,
+            promo_code_id=promo.id if promo is not None else None,
             provider=provider_name,
             amount=amount,
             currency=currency,
             idempotency_key=idempotency_key,
-            metadata_json={"plan_id": plan.id},
+            metadata_json={
+                "plan_id": plan.id,
+                "base_amount": str(base_amount),
+                "promo_code_id": promo.id if promo is not None else None,
+                "promo_discount_percent": (
+                    promo.discount_percent if promo is not None else None
+                ),
+            },
         )
         self.session.add(payment)
         await self.session.flush()
@@ -106,9 +149,19 @@ class PaymentService:
                     plan_id=plan.id,
                     amount=amount,
                     currency=currency,
-                    description=f"{plan.title} subscription",
+                    description=(
+                        f"{plan.title} subscription"
+                        + (
+                            f" (-{promo.discount_percent}%)"
+                            if promo is not None
+                            else ""
+                        )
+                    ),
                     idempotency_key=idempotency_key,
-                    metadata={"payment_id": payment.id},
+                    metadata={
+                        "payment_id": payment.id,
+                        "promo_code_id": promo.id if promo is not None else None,
+                    },
                 )
             )
         except Exception:

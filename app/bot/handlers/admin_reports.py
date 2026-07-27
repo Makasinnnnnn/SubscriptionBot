@@ -540,6 +540,7 @@ async def payment_card(callback: CallbackQuery) -> None:
             options=[
                 selectinload(Payment.user),
                 selectinload(Payment.plan).selectinload(Plan.channel),
+                selectinload(Payment.promo_code),
                 selectinload(Payment.subscription),
             ],
         )
@@ -568,6 +569,7 @@ async def payment_card(callback: CallbackQuery) -> None:
         f"Канал: {payment.plan.channel.title}\n"
         f"Провайдер: {payment.provider}\n"
         f"Сумма: {payment.amount:g} {payment.currency}\n"
+        f"Промокод: {payment.promo_code.code if payment.promo_code else 'нет'}\n"
         f"Статус: {payment.status.value}\n"
         f"Создан: {payment.created_at:%d.%m.%Y %H:%M}\n"
         f"Оплачен: {_format_dt(payment.paid_at)}\n"
@@ -807,6 +809,7 @@ async def export_report(callback: CallbackQuery) -> None:
                     statement.options(
                         selectinload(Payment.user),
                         selectinload(Payment.plan).selectinload(Plan.channel),
+                        selectinload(Payment.promo_code),
                     )
                     .order_by(Payment.id.desc())
                     .limit(MAX_EXPORT_ROWS + 1)
@@ -828,6 +831,8 @@ async def export_report(callback: CallbackQuery) -> None:
                     "Оплачен",
                     "Возвращён",
                     "Внешний ID",
+                    "Промокод",
+                    "Скидка, %",
                 ],
                 rows=[
                     (
@@ -844,6 +849,12 @@ async def export_report(callback: CallbackQuery) -> None:
                         item.paid_at or "",
                         item.refunded_at or "",
                         _masked_external_id(item.provider_payment_id),
+                        item.promo_code.code if item.promo_code else "",
+                        (
+                            item.promo_code.discount_percent
+                            if item.promo_code
+                            else ""
+                        ),
                     )
                     for item in payments[:MAX_EXPORT_ROWS]
                 ],

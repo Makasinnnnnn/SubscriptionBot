@@ -1,9 +1,10 @@
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
     ChatJoinRequest,
@@ -29,8 +30,9 @@ from app.db.enums import PaymentStatus, SubscriptionStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User
 from app.db.session import async_session_factory
 from app.payments.providers import ProviderAPIError, ProviderNotConfiguredError
-from app.services.payment_service import PaymentService, set_status_timestamp
 from app.services.legal_service import LegalAcceptanceRequiredError, LegalService
+from app.services.payment_service import PaymentService, set_status_timestamp
+from app.services.promo_service import PromoRedemptionError
 from app.services.admin_notification_service import AdminNotificationService
 from app.subscriptions.join_requests import JoinRequestService
 from app.subscriptions.presentation import access_delivery_text
@@ -155,7 +157,8 @@ async def send_main_menu(message: Message) -> None:
 
 
 @router.callback_query(F.data == "menu:main")
-async def main_menu(callback: CallbackQuery) -> None:
+async def main_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     await callback.answer()
     if callback.message:
         await callback.message.edit_text("PropGate\n\nВыберите действие:", reply_markup=main_menu_keyboard())
@@ -256,13 +259,17 @@ async def create_payment(callback: CallbackQuery) -> None:
     if callback.data is None or callback.message is None:
         return
     try:
-        _, plan_id_raw, provider_name = callback.data.split(":", maxsplit=2)
+        parts = callback.data.split(":")
+        if len(parts) not in {3, 4}:
+            raise ValueError
+        _, plan_id_raw, provider_name = parts[:3]
         plan_id = int(plan_id_raw)
+        promo_id = int(parts[3]) if len(parts) == 4 else None
     except ValueError:
         await callback.message.edit_text("Некорректные параметры платежа.")
         return
 
-    await _create_payment_flow(callback, plan_id, provider_name)
+    await _create_payment_flow(callback, plan_id, provider_name, promo_id)
 
 
 @router.callback_query(F.data == "payunavailable:sbp")
@@ -278,8 +285,12 @@ async def accept_legal_and_pay(callback: CallbackQuery) -> None:
     if callback.data is None or callback.message is None:
         return
     try:
-        _, plan_id_raw, provider_name = callback.data.split(":", maxsplit=2)
+        parts = callback.data.split(":")
+        if len(parts) not in {3, 4}:
+            raise ValueError
+        _, plan_id_raw, provider_name = parts[:3]
         plan_id = int(plan_id_raw)
+        promo_id = int(parts[3]) if len(parts) == 4 else None
     except ValueError:
         await callback.answer("Некорректные параметры.", show_alert=True)
         return
@@ -288,13 +299,14 @@ async def accept_legal_and_pay(callback: CallbackQuery) -> None:
         await LegalService(session).accept(user)
         await session.commit()
     await callback.answer("Условия приняты.")
-    await _create_payment_flow(callback, plan_id, provider_name)
+    await _create_payment_flow(callback, plan_id, provider_name, promo_id)
 
 
 async def _create_payment_flow(
     callback: CallbackQuery,
     plan_id: int,
     provider_name: str,
+    promo_id: int | None = None,
 ) -> None:
     if callback.message is None:
         return
@@ -305,12 +317,28 @@ async def _create_payment_flow(
             await callback.message.edit_text("Тариф недоступен.", reply_markup=main_menu_keyboard())
             return
         try:
-            payment = await PaymentService(session).create_payment(user, plan, provider_name)
+            payment = await PaymentService(session).create_payment(
+                user,
+                plan,
+                provider_name,
+                promo_id=promo_id,
+            )
         except LegalAcceptanceRequiredError:
             await session.rollback()
             await callback.message.edit_text(
                 "Перед оплатой ознакомьтесь с документами и подтвердите согласие с их текущей версией.",
-                reply_markup=legal_acceptance_keyboard(plan_id, provider_name),
+                reply_markup=legal_acceptance_keyboard(
+                    plan_id,
+                    provider_name,
+                    promo_id,
+                ),
+            )
+            return
+        except PromoRedemptionError as exc:
+            await session.rollback()
+            await callback.message.edit_text(
+                f"Промокод не применён: {exc}",
+                reply_markup=main_menu_keyboard(),
             )
             return
         except (ProviderNotConfiguredError, ProviderAPIError, ValueError) as exc:
@@ -323,7 +351,7 @@ async def _create_payment_flow(
             )
             await callback.message.edit_text(
                 "Не удалось создать платёж выбранным способом. Попробуйте позже или обратитесь в поддержку.",
-                reply_markup=payment_providers_keyboard(plan),
+                reply_markup=payment_providers_keyboard(plan, promo_id),
             )
             return
 
@@ -340,7 +368,7 @@ async def _create_payment_flow(
         except TelegramAPIError:
             await callback.message.edit_text(
                 "Telegram не смог создать счёт в Stars. Попробуй ещё раз позже.",
-                reply_markup=payment_providers_keyboard(plan),
+                reply_markup=payment_providers_keyboard(plan, promo_id),
             )
             return
         await callback.message.edit_text(
@@ -615,7 +643,9 @@ async def telegram_stars_pre_checkout(query: PreCheckoutQuery) -> None:
             and payment.amount == query.total_amount
             and payment.plan.is_active
             and payment.plan.channel.is_active
-            and payment.plan.stars_price == query.total_amount
+            and payment.created_at
+            >= datetime.now(UTC).replace(tzinfo=None)
+            - timedelta(hours=1)
         )
         if valid:
             valid = await _plan_is_available(session, payment.plan)

@@ -65,8 +65,9 @@ curl -fsS http://127.0.0.1:8000/health
 curl -fsS http://127.0.0.1:8000/health/db
 ```
 
-The `0008_promos_and_reminders` migration adds promo tables and period-aware
-notification fields. Always create and verify a backup before applying it.
+The `0009_discount_promos` migration converts promo codes into payment
+discounts and links them to invoices/redemptions. It includes `0008` when that
+revision has not been applied yet. Always create and verify a backup before applying it.
 Do not start the new bot or scheduler before the `migrations` service exits
 successfully.
 
@@ -88,8 +89,9 @@ docker compose --env-file .env.production -f docker-compose.yml -f docker-compos
 ```
 
 Open `/admin` and check tariff tabs, promo creation, support contacts,
-reminder intervals and XLSX export. Then redeem a disposable promo with a test
-Telegram account and verify join requests for both channels.
+reminder intervals and XLSX export. Then create a disposable discount promo,
+verify the provider invoice amount and complete a test payment before checking
+join requests for both channels.
 
 ## Backups, DNS and HTTPS
 

@@ -21,6 +21,26 @@ def test_legal_payment_keyboard_uses_internal_tabs() -> None:
     assert all(callback is None or len(callback.encode()) <= 64 for callback in callbacks)
 
 
+def test_discount_promo_survives_legal_and_provider_callbacks() -> None:
+    legal_keyboard = legal_acceptance_keyboard(
+        12,
+        "telegram-stars",
+        promo_id=34,
+    )
+    legal_callbacks = [
+        button.callback_data
+        for row in legal_keyboard.inline_keyboard
+        for button in row
+    ]
+
+    assert "legaldoc:terms:0:12:telegram-stars:34" in legal_callbacks
+    assert "legalaccept:12:telegram-stars:34" in legal_callbacks
+    assert all(
+        callback is None or len(callback.encode()) <= 64
+        for callback in legal_callbacks
+    )
+
+
 def test_markdown_heading_is_rendered_as_plain_text() -> None:
     assert _plain_markdown("# Heading\nBody") == "Heading\nBody"
 
@@ -58,3 +78,11 @@ def test_ruble_plan_offers_crypto_and_configured_stars(monkeypatch) -> None:
     ]
     assert "pay:1:telegram-stars" in callbacks
     assert "pay:1:cryptobot" in callbacks
+
+    promo_callbacks = [
+        button.callback_data
+        for row in payment_providers_keyboard(plan, promo_id=34).inline_keyboard
+        for button in row
+    ]
+    assert "pay:1:telegram-stars:34" in promo_callbacks
+    assert "pay:1:cryptobot:34" in promo_callbacks

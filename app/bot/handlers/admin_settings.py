@@ -5,14 +5,15 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.admin.service import AdminPermissionService
 from app.admin.settings_service import RuntimeSettingsService
 from app.bot.keyboards.admin import admin_cancel_keyboard, admin_menu_keyboard
 from app.core.config import get_settings
-from app.db.models import Plan, PromoCode, PromoRedemption
+from app.db.enums import PaymentStatus
+from app.db.models import Payment, Plan, PromoCode, PromoRedemption
 from app.db.session import async_session_factory
 from app.services.promo_service import PromoRedemptionError, normalize_promo_code
 from app.services.support_service import (
@@ -27,6 +28,7 @@ router = Router()
 
 class PromoAdminForm(StatesGroup):
     code = State()
+    discount_percent = State()
     valid_from = State()
     valid_until = State()
     max_redemptions = State()
@@ -73,7 +75,8 @@ async def promo_list(callback: CallbackQuery, state: FSMContext) -> None:
         [
             InlineKeyboardButton(
                 text=(
-                    f"{promo.code} | {promo.redemptions_count}/"
+                    f"{promo.code} | -{promo.discount_percent}% | "
+                    f"{promo.redemptions_count}/"
                     f"{promo.max_redemptions} | {promo.plan.title}"
                 )[:64],
                 callback_data=f"cfg:promo:{promo.id}",
@@ -147,6 +150,7 @@ async def promo_create_plan(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await _edit(
         callback,
+        f"Выбран тариф: {plan.channel.title} | {plan.title}\n\n"
         "Введите код: 4-32 латинских символа, цифры, '-' или '_'.",
         admin_cancel_keyboard("cfg:promos:active"),
     )
@@ -170,6 +174,20 @@ async def promo_create_code(message: Message, state: FSMContext) -> None:
         await message.answer("Такой промокод уже существует.")
         return
     await state.update_data(code=code)
+    await state.set_state(PromoAdminForm.discount_percent)
+    await message.answer(
+        "Введите скидку в процентах: целое число от 1 до 99."
+    )
+
+
+@router.message(PromoAdminForm.discount_percent)
+async def promo_create_discount(message: Message, state: FSMContext) -> None:
+    try:
+        discount_percent = _bounded_int(message.text, 1, 99)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    await state.update_data(discount_percent=discount_percent)
     await state.set_state(PromoAdminForm.valid_from)
     await message.answer(
         "Дата начала в UTC: `сейчас` или ДД.ММ.ГГГГ ЧЧ:ММ.",
@@ -231,6 +249,7 @@ async def promo_create_limit(message: Message, state: FSMContext) -> None:
             plan_id=plan.id,
             valid_from=datetime.fromisoformat(data["valid_from"]),
             valid_until=datetime.fromisoformat(data["valid_until"]),
+            discount_percent=int(data["discount_percent"]),
             max_redemptions=limit,
             per_user_limit=1,
             created_by_telegram_id=message.from_user.id,
@@ -242,7 +261,11 @@ async def promo_create_limit(message: Message, state: FSMContext) -> None:
             "promo.create",
             "promo_code",
             promo.id,
-            {"plan_id": plan.id, "max_redemptions": limit},
+            {
+                "plan_id": plan.id,
+                "discount_percent": promo.discount_percent,
+                "max_redemptions": limit,
+            },
         )
         await session.commit()
         promo_id = promo.id
@@ -295,6 +318,7 @@ async def promo_card(callback: CallbackQuery, state: FSMContext) -> None:
         f"Статус: {'активен' if promo.is_active else 'архив'}\n"
         f"Тариф: {promo.plan.title}\n"
         f"Канал: {promo.plan.channel.title}\n"
+        f"Скидка: {promo.discount_percent}%\n"
         f"Начало: {promo.valid_from:%d.%m.%Y %H:%M} UTC\n"
         f"Окончание: {promo.valid_until:%d.%m.%Y %H:%M} UTC\n"
         f"Использовано: {promo.redemptions_count}/{promo.max_redemptions}\n"
@@ -305,9 +329,15 @@ async def promo_card(callback: CallbackQuery, state: FSMContext) -> None:
     rows = [
         [
             InlineKeyboardButton(
+                text="Скидка",
+                callback_data=f"cfg:promoedit:{promo.id}:discount",
+            ),
+            InlineKeyboardButton(
                 text="Тариф",
                 callback_data=f"cfg:promoeditplan:{promo.id}",
             ),
+        ],
+        [
             InlineKeyboardButton(
                 text="Лимит",
                 callback_data=f"cfg:promoedit:{promo.id}:limit",
@@ -398,6 +428,15 @@ async def promo_edit_plan_save(callback: CallbackQuery) -> None:
         ):
             await callback.answer("Изменение недоступно.", show_alert=True)
             return
+        if promo.redemptions_count > 0 or await _promo_locked_payment_count(
+            session,
+            promo.id,
+        ):
+            await callback.answer(
+                "Тариф нельзя менять после создания счетов по промокоду.",
+                show_alert=True,
+            )
+            return
         old_plan_id = promo.plan_id
         promo.plan_id = plan.id
         await AdminPermissionService(session).audit(
@@ -414,7 +453,12 @@ async def promo_edit_plan_save(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("cfg:promoedit:"))
 async def promo_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
     parts = (callback.data or "").split(":")
-    if len(parts) != 4 or parts[3] not in {"limit", "from", "until"}:
+    if len(parts) != 4 or parts[3] not in {
+        "discount",
+        "limit",
+        "from",
+        "until",
+    }:
         return
     try:
         promo_id = int(parts[2])
@@ -426,6 +470,7 @@ async def promo_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Промокод недоступен.", show_alert=True)
         return
     prompts = {
+        "discount": "Новая скидка: целое число от 1 до 99.",
         "limit": "Новый общий лимит применений:",
         "from": "Новая дата начала в UTC: `сейчас` или ДД.ММ.ГГГГ ЧЧ:ММ.",
         "until": "Новая дата окончания в UTC: ДД.ММ.ГГГГ ЧЧ:ММ.",
@@ -454,7 +499,15 @@ async def promo_edit_save(message: Message, state: FSMContext) -> None:
             await message.answer("Промокод недоступен.")
             return
         try:
-            if field == "limit":
+            if field == "discount":
+                if await _promo_locked_payment_count(session, promo.id):
+                    raise ValueError(
+                        "Скидку нельзя менять после создания счетов по промокоду."
+                    )
+                value = _bounded_int(message.text, 1, 99)
+                old_value = promo.discount_percent
+                promo.discount_percent = value
+            elif field == "limit":
                 value = _bounded_int(message.text, 1, 1_000_000)
                 if value < promo.redemptions_count:
                     raise ValueError(
@@ -881,6 +934,13 @@ async def support_delete(callback: CallbackQuery) -> None:
         if index >= len(contacts):
             await callback.answer("Контакт не найден.", show_alert=True)
             return
+        if len(contacts) == 1:
+            await callback.answer(
+                "Нельзя удалить последний контакт. Сначала добавьте новый "
+                "или верните настройки из .env.",
+                show_alert=True,
+            )
+            return
         removed = contacts.pop(index)
         await service.save(contacts, callback.from_user.id)
         await AdminPermissionService(session).audit(
@@ -1133,6 +1193,20 @@ async def _managed_promo(
     ):
         return None
     return promo
+
+
+async def _promo_locked_payment_count(session, promo_id: int) -> int:
+    return int(
+        await session.scalar(
+            select(func.count(Payment.id)).where(
+                Payment.promo_code_id == promo_id,
+                Payment.status.in_(
+                    [PaymentStatus.PENDING, PaymentStatus.PAID]
+                ),
+            )
+        )
+        or 0
+    )
 
 
 async def _can_manage_message(message: Message) -> bool:

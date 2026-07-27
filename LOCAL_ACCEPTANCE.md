@@ -28,7 +28,8 @@ working database in an unattended test.
 
 - create and edit a tariff from `/admin`;
 - switch between active/archive/all tariff tabs and inspect metrics;
-- create and redeem a one-use promo, then verify both join-request links;
+- create a percentage promo for a specific tariff, verify the discounted
+  invoice amount, pay it and then verify both join-request links;
 - filter users/subscriptions/payments and open every generated XLSX;
 - add one username and one Telegram ID to support, test and reorder them;
 - set reminders to `1d,12h` and verify no immediate long-threshold message;

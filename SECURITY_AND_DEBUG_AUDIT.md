@@ -9,8 +9,9 @@ Audit date: 2026-07-27.
   injection protection.
 - Added tariff tabs and cards with status, payment statistics, revenue by
   currency and provider availability.
-- Added atomic one-use promo redemption, UTC validity windows, limits,
-  administration screens and an Alembic migration.
+- Added tariff-specific percentage promo discounts, UTC validity windows,
+  pending-invoice reservations, limits, administration screens and Alembic
+  migrations.
 - Unified `/support` and `Помощь`; added typed runtime contacts. Numeric IDs
   are never rendered as `@number`.
 - Reworked expiration reminders around the current subscription period and
@@ -53,7 +54,7 @@ Audit date: 2026-07-27.
 ## Automated verification
 
 - `ruff check app tests main.py`
-- `pytest -q` (`100 passed`)
+- `pytest -q` (`107 passed`)
 - `compileall -q app main.py tests`
 - `pip check`
 - `alembic heads` and revision-chain inspection
@@ -65,7 +66,7 @@ Docker Desktop was not running; it remains part of deployment acceptance.
 
 ## Required external checks
 
-- Apply migration `0008_promos_and_reminders` to a backed-up PostgreSQL
+- Apply migrations through `0009_discount_promos` to a backed-up PostgreSQL
   database and inspect the migrations container exit code.
 - Complete one real Crypto Pay payment/webhook and one Telegram Stars
   payment/refund where regionally available.

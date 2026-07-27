@@ -45,7 +45,10 @@ def plans_keyboard(plans: list[Plan]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def payment_providers_keyboard(plan: Plan) -> InlineKeyboardMarkup:
+def payment_providers_keyboard(
+    plan: Plan,
+    promo_id: int | None = None,
+) -> InlineKeyboardMarkup:
     settings = get_settings()
     providers: list[str] = []
     if settings.enable_telegram_stars and plan.stars_price:
@@ -57,35 +60,58 @@ def payment_providers_keyboard(plan: Plan) -> InlineKeyboardMarkup:
     ):
         providers.append("cryptobot")
     rows = [
-        [InlineKeyboardButton(text=PAYMENT_PROVIDERS[provider], callback_data=f"pay:{plan.id}:{provider}")]
+        [
+            InlineKeyboardButton(
+                text=PAYMENT_PROVIDERS[provider],
+                callback_data=_payment_callback(plan.id, provider, promo_id),
+            )
+        ]
         for provider in providers
     ]
     if settings.enable_yookassa and settings.yookassa_shop_id and settings.yookassa_secret_key:
-        rows.append([InlineKeyboardButton(text="СБП", callback_data=f"pay:{plan.id}:yookassa")])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="СБП",
+                    callback_data=_payment_callback(
+                        plan.id,
+                        "yookassa",
+                        promo_id,
+                    ),
+                )
+            ]
+        )
     else:
         rows.append([InlineKeyboardButton(text="СБП (временно недоступно)", callback_data="payunavailable:sbp")])
     rows.append([InlineKeyboardButton(text="К тарифам", callback_data="plans:list")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def legal_acceptance_keyboard(plan_id: int, provider: str) -> InlineKeyboardMarkup:
+def legal_acceptance_keyboard(
+    plan_id: int,
+    provider: str,
+    promo_id: int | None = None,
+) -> InlineKeyboardMarkup:
+    context = f"{plan_id}:{provider}"
+    if promo_id is not None:
+        context += f":{promo_id}"
     rows = [
         [
             InlineKeyboardButton(
                 text="Условия",
-                callback_data=f"legaldoc:terms:0:{plan_id}:{provider}",
+                callback_data=f"legaldoc:terms:0:{context}",
             )
         ],
         [
             InlineKeyboardButton(
                 text="Обработка данных",
-                callback_data=f"legaldoc:privacy:0:{plan_id}:{provider}",
+                callback_data=f"legaldoc:privacy:0:{context}",
             )
         ],
         [
             InlineKeyboardButton(
                 text="Возвраты",
-                callback_data=f"legaldoc:refunds:0:{plan_id}:{provider}",
+                callback_data=f"legaldoc:refunds:0:{context}",
             )
         ],
     ]
@@ -93,11 +119,18 @@ def legal_acceptance_keyboard(plan_id: int, provider: str) -> InlineKeyboardMark
         [
             InlineKeyboardButton(
                 text="Принимаю условия",
-                callback_data=f"legalaccept:{plan_id}:{provider}",
+                callback_data=f"legalaccept:{context}",
             )
         ]
     )
-    rows.append([InlineKeyboardButton(text="Отказаться", callback_data=f"plan:{plan_id}")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Отказаться",
+                callback_data="promo:enter" if promo_id is not None else f"plan:{plan_id}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -123,3 +156,12 @@ def payment_keyboard(
 def _format_price(price: Decimal, currency: str) -> str:
     normalized = price.quantize(Decimal("1")) if price == price.to_integral() else price
     return f"{normalized} {currency}"
+
+
+def _payment_callback(
+    plan_id: int,
+    provider: str,
+    promo_id: int | None,
+) -> str:
+    value = f"pay:{plan_id}:{provider}"
+    return f"{value}:{promo_id}" if promo_id is not None else value

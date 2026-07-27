@@ -1,12 +1,22 @@
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import select
 
-from app.bot.keyboards.subscription import legal_acceptance_keyboard
+from app.admin.service import AdminPermissionService
+from app.bot.keyboards.subscription import (
+    legal_acceptance_keyboard,
+    main_menu_keyboard,
+)
 from app.db.session import async_session_factory
-from app.services.support_service import SupportContactService
+from app.db.models import AuditLog
+from app.services.support_service import ResolvedSupportContact, SupportContactService
 
 router = Router()
 
@@ -17,6 +27,11 @@ DOCUMENTS = {
     "refunds": ("Правила возврата", LEGAL_DIR / "refunds.md"),
 }
 PAGE_SIZE = 3000
+SUPPORT_MESSAGE_COOLDOWN = timedelta(minutes=1)
+
+
+class SupportMessageForm(StatesGroup):
+    message = State()
 
 
 @router.message(Command("terms"))
@@ -49,7 +64,7 @@ async def legal_document(callback: CallbackQuery) -> None:
     if callback.data is None or callback.message is None:
         return
     parts = callback.data.split(":")
-    if len(parts) not in {4, 5}:
+    if len(parts) not in {4, 5, 6}:
         await callback.answer("Некорректная ссылка.", show_alert=True)
         return
     key = parts[1]
@@ -67,22 +82,29 @@ async def legal_document(callback: CallbackQuery) -> None:
 async def legal_review(callback: CallbackQuery) -> None:
     if callback.data is None or callback.message is None:
         return
-    parts = callback.data.split(":", maxsplit=2)
-    if len(parts) != 3:
+    parts = callback.data.split(":")
+    if len(parts) not in {3, 4}:
         return
     try:
         plan_id = int(parts[1])
     except ValueError:
         return
+    promo_id = None
+    if len(parts) == 4:
+        try:
+            promo_id = int(parts[3])
+        except ValueError:
+            return
     await callback.answer()
     await callback.message.edit_text(
         "Перед оплатой ознакомьтесь с документами и подтвердите согласие с их текущей версией.",
-        reply_markup=legal_acceptance_keyboard(plan_id, parts[2]),
+        reply_markup=legal_acceptance_keyboard(plan_id, parts[2], promo_id),
     )
 
 
 @router.message(Command("support"))
-async def support(message: Message) -> None:
+async def support(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(
         _support_menu_text(),
         reply_markup=_support_menu_keyboard(),
@@ -90,7 +112,8 @@ async def support(message: Message) -> None:
 
 
 @router.callback_query(F.data.in_({"menu:help", "support:menu"}))
-async def support_menu(callback: CallbackQuery) -> None:
+async def support_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     await callback.answer()
     if callback.message:
         await callback.message.edit_text(
@@ -157,10 +180,134 @@ async def support_contacts(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data.startswith("support:write:"))
+async def support_write_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if callback.message is None:
+        return
+    try:
+        contact_index = int((callback.data or "").rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer("Контакт не найден.", show_alert=True)
+        return
+    contacts = await _support_targets(callback.bot)
+    if not 0 <= contact_index < len(contacts):
+        await callback.answer("Контакт больше не доступен.", show_alert=True)
+        return
+    contact = contacts[contact_index]
+    if contact.source.kind != "telegram_id":
+        await callback.answer("Для этого контакта доступна прямая ссылка.", show_alert=True)
+        return
+    await state.set_state(SupportMessageForm.message)
+    await state.update_data(
+        support_kind=contact.source.kind,
+        support_value=contact.source.value,
+        support_label=contact.label,
+    )
+    await callback.answer()
+    await callback.message.edit_text(
+        f"Сообщение для «{contact.label}»\n\n"
+        "Напишите одним сообщением, что произошло. Бот передаст текст вместе "
+        "с вашим Telegram ID. Не отправляйте пароли, коды или данные карты.",
+        reply_markup=_support_back_keyboard(),
+    )
+
+
+@router.message(
+    SupportMessageForm.message,
+    F.text,
+    ~F.text.startswith("/"),
+)
+async def support_write_send(message: Message, state: FSMContext) -> None:
+    if message.from_user is None:
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Отправьте обращение текстовым сообщением.")
+        return
+    if len(text) > 3000:
+        await message.answer("Сообщение слишком длинное. Сократите его до 3000 символов.")
+        return
+    data = await state.get_data()
+    target_value = str(data.get("support_value", ""))
+    now = datetime.now(UTC).replace(tzinfo=None)
+    async with async_session_factory() as session:
+        definitions = await SupportContactService(session).definitions()
+        last_sent_at = await session.scalar(
+            select(AuditLog.created_at)
+            .where(
+                AuditLog.actor_telegram_id == message.from_user.id,
+                AuditLog.action == "support.message.sent",
+            )
+            .order_by(AuditLog.created_at.desc())
+            .limit(1)
+        )
+    allowed = any(
+        contact.kind == "telegram_id" and contact.value == target_value
+        for contact in definitions
+    )
+    if not allowed:
+        await state.clear()
+        await message.answer(
+            "Контакт поддержки изменился. Откройте раздел поддержки ещё раз.",
+            reply_markup=_support_menu_keyboard(),
+        )
+        return
+    if last_sent_at and now - last_sent_at < SUPPORT_MESSAGE_COOLDOWN:
+        wait_seconds = max(
+            1,
+            int((SUPPORT_MESSAGE_COOLDOWN - (now - last_sent_at)).total_seconds()),
+        )
+        await message.answer(
+            f"Предыдущее обращение уже доставлено. Новое можно отправить через "
+            f"{wait_seconds} сек."
+        )
+        return
+    username = (
+        f"@{message.from_user.username}"
+        if message.from_user.username
+        else "не задан"
+    )
+    try:
+        await message.bot.send_message(
+            int(target_value),
+            "Новое обращение в поддержку PropGate\n\n"
+            f"Пользователь: {username}\n"
+            f"Telegram ID: {message.from_user.id}\n"
+            f"Имя: {message.from_user.full_name}\n\n"
+            f"{text}",
+        )
+    except (TelegramAPIError, ValueError):
+        await state.clear()
+        await message.answer(
+            "Не удалось доставить сообщение. Сотрудник поддержки должен сначала "
+            "запустить этого бота командой /start.",
+            reply_markup=_support_menu_keyboard(),
+        )
+        return
+    async with async_session_factory() as session:
+        await AdminPermissionService(session).audit(
+            message.from_user.id,
+            "support.message.sent",
+            "support_contact",
+            target_value,
+            {"label": str(data.get("support_label", ""))[:48]},
+        )
+        await session.commit()
+    await state.clear()
+    await message.answer(
+        "Сообщение доставлено поддержке.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
 @router.message(Command("paysupport"))
 async def payment_support(message: Message) -> None:
     contacts = await _support_targets(message.bot)
-    contact = ", ".join(label for label, _ in contacts) or "не настроен"
+    contact = ", ".join(item.label for item in contacts) or "не настроен"
     await message.answer(
         f"Поддержка по платежам: {contact}\n\n"
         "Telegram не обрабатывает обращения по покупкам в этом боте. "
@@ -169,22 +316,30 @@ async def payment_support(message: Message) -> None:
     )
 
 
-async def _support_targets(bot: Bot) -> list[tuple[str, str]]:
+async def _support_targets(bot: Bot) -> list[ResolvedSupportContact]:
     async with async_session_factory() as session:
-        contacts = await SupportContactService(session).resolved(bot)
-    return [(contact.label, contact.url) for contact in contacts]
+        return await SupportContactService(session).resolved(bot)
 
 
 def _support_keyboard(
-    contacts: list[tuple[str, str]],
+    contacts: list[ResolvedSupportContact],
     *,
     back_callback: str,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             *[
-                [InlineKeyboardButton(text=label, url=url)]
-                for label, url in contacts
+                [
+                    (
+                        InlineKeyboardButton(text=contact.label, url=contact.url)
+                        if contact.url
+                        else InlineKeyboardButton(
+                            text=contact.label,
+                            callback_data=f"support:write:{index}",
+                        )
+                    )
+                ]
+                for index, contact in enumerate(contacts)
             ],
             [InlineKeyboardButton(text="Назад", callback_data=back_callback)],
         ]
@@ -306,7 +461,7 @@ def _document_keyboard(
             [
                 InlineKeyboardButton(
                     text="К подтверждению",
-                    callback_data=f"legalreview:{context[0]}:{context[1]}",
+                    callback_data=f"legalreview:{':'.join(context)}",
                 )
             ]
         )

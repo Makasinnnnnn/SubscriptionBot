@@ -22,6 +22,7 @@ from app.db.models import (
     User,
 )
 from app.services.admin_notification_service import AdminNotificationService
+from app.services.promo_service import PromoService
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +69,17 @@ class SubscriptionService:
                 existing_for_payment.channel,
                 bot,
             )
+            await PromoService(self.session).finalize_redemption(
+                payment,
+                existing_for_payment,
+            )
             return existing_for_payment, invite_link, materials_invite
 
-        plan = await self.session.get(Plan, payment.plan_id, options=[selectinload(Plan.channel)])
+        plan = await self.session.scalar(
+            select(Plan)
+            .options(selectinload(Plan.channel))
+            .where(Plan.id == payment.plan_id)
+        )
         if plan is None:
             raise ValueError("Payment plan not found")
 
@@ -103,6 +112,10 @@ class SubscriptionService:
             plan.channel,
             bot,
             force_new=True,
+        )
+        await PromoService(self.session).finalize_redemption(
+            payment,
+            subscription,
         )
         await self._notify_admins(
             bot,
@@ -176,56 +189,6 @@ class SubscriptionService:
             channel.id,
         )
         return subscription, invite_link
-
-    async def activate_from_promo(
-        self,
-        user: User,
-        plan: Plan,
-        bot: Bot,
-    ) -> tuple[Subscription, InviteLink, str | None]:
-        if not plan.is_active or not plan.channel.is_active:
-            raise ValueError("Promo plan is not active")
-
-        now = _utcnow()
-        subscription = await self._active_subscription(user.id, plan.channel_id)
-        if subscription is None:
-            subscription = Subscription(
-                user_id=user.id,
-                channel_id=plan.channel_id,
-                payment_id=None,
-                status=SubscriptionStatus.ACTIVE,
-                starts_at=now,
-                period_started_at=now,
-                expires_at=now,
-                source="promo",
-            )
-            self.session.add(subscription)
-
-        base_expiry = max(now, subscription.expires_at)
-        subscription.status = SubscriptionStatus.ACTIVE
-        subscription.period_started_at = base_expiry
-        subscription.expires_at = base_expiry + timedelta(days=plan.duration_days)
-        subscription.cancelled_at = None
-        subscription.revoked_at = None
-        subscription.revoke_reason = None
-        subscription.source = "promo"
-        await self.session.flush()
-
-        invite, materials = await self._provision_access_links(
-            subscription,
-            plan.channel,
-            bot,
-            force_new=True,
-        )
-        await self._notify_admins(
-            bot,
-            "subscriptions",
-            "subscription.promo_activated",
-            f"Промокод активировал подписку пользователя {user.telegram_id}.",
-            f"promo:{subscription.id}:{subscription.expires_at.isoformat()}",
-            plan.channel_id,
-        )
-        return subscription, invite, materials
 
     async def revoke(
         self,

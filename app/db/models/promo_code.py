@@ -8,6 +8,7 @@ from app.db.base import Base
 from app.db.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
+    from app.db.models.payment import Payment
     from app.db.models.plan import Plan
     from app.db.models.promo_redemption import PromoRedemption
 
@@ -18,8 +19,8 @@ class PromoCode(TimestampMixin, Base):
         CheckConstraint("max_redemptions > 0", name="ck_promo_codes_max_redemptions"),
         CheckConstraint("redemptions_count >= 0", name="ck_promo_codes_redemptions_count"),
         CheckConstraint(
-            "redemptions_count <= max_redemptions",
-            name="ck_promo_codes_redemptions_within_limit",
+            "discount_percent BETWEEN 1 AND 99",
+            name="ck_promo_codes_discount_percent",
         ),
         CheckConstraint("per_user_limit > 0", name="ck_promo_codes_per_user_limit"),
         CheckConstraint("valid_until > valid_from", name="ck_promo_codes_valid_window"),
@@ -33,6 +34,7 @@ class PromoCode(TimestampMixin, Base):
     )
     valid_from: Mapped[datetime] = mapped_column(index=True)
     valid_until: Mapped[datetime] = mapped_column(index=True)
+    discount_percent: Mapped[int] = mapped_column(Integer)
     max_redemptions: Mapped[int] = mapped_column(Integer)
     redemptions_count: Mapped[int] = mapped_column(Integer, default=0)
     per_user_limit: Mapped[int] = mapped_column(Integer, default=1)
@@ -47,3 +49,4 @@ class PromoCode(TimestampMixin, Base):
     redemptions: Mapped[list["PromoRedemption"]] = relationship(
         back_populates="promo_code",
     )
+    payments: Mapped[list["Payment"]] = relationship(back_populates="promo_code")
