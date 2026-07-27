@@ -544,14 +544,18 @@ async def admin_settings(message: Message) -> None:
             return
         runtime = RuntimeSettingsService(session)
         settings = get_settings()
-        days = await runtime.notification_days(settings.notification_days)
+        intervals = await runtime.notification_intervals_minutes(
+            settings.notification_intervals_minutes,
+            settings.notification_days,
+        )
         invite_ttl = await runtime.invite_ttl_minutes()
         scheduler_interval = await runtime.scheduler_interval_minutes(
             settings.scheduler_interval_minutes
         )
         await message.answer(
             "Настройки:\n"
-            f"Напоминания: {', '.join(map(str, days))} дн.\n"
+            "Напоминания: "
+            f"{', '.join(_format_interval(item) for item in intervals)}\n"
             f"Срок invite-ссылки: {invite_ttl} мин.\n"
             f"Интервал scheduler: {scheduler_interval} мин.\n"
             f"Dev-payment: {'включён' if settings.enable_dev_payments else 'выключен через .env'}"
@@ -571,14 +575,50 @@ async def admin_set_notification_days(message: Message) -> None:
         except ValueError:
             await message.answer("Формат: /admin_set_notification_days 7,3,1")
             return
-        await RuntimeSettingsService(session).set(
+        runtime = RuntimeSettingsService(session)
+        await runtime.set(
             RuntimeSettingsService.NOTIFICATION_DAYS,
             days,
+            message.from_user.id,
+        )
+        await runtime.set(
+            RuntimeSettingsService.NOTIFICATION_INTERVALS_MINUTES,
+            [day * 1440 for day in days],
             message.from_user.id,
         )
         await _audit(session, message, "settings.notification_days", "setting", None, {"days": days})
         await session.commit()
         await message.answer(f"Напоминания настроены за {', '.join(map(str, days))} дн.")
+
+
+@router.message(Command("admin_set_notification_intervals"))
+async def admin_set_notification_intervals(message: Message) -> None:
+    async with async_session_factory() as session:
+        if not await _authorize_message(message, session, superadmin=True):
+            return
+        try:
+            intervals = _parse_notification_intervals(_command_payload(message))
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        await RuntimeSettingsService(session).set(
+            RuntimeSettingsService.NOTIFICATION_INTERVALS_MINUTES,
+            intervals,
+            message.from_user.id,
+        )
+        await _audit(
+            session,
+            message,
+            "settings.notification_intervals",
+            "setting",
+            None,
+            {"intervals_minutes": intervals},
+        )
+        await session.commit()
+        await message.answer(
+            "Напоминания настроены: "
+            + ", ".join(_format_interval(item) for item in intervals)
+        )
 
 
 @router.message(Command("admin_set_invite_ttl"))
@@ -1310,6 +1350,40 @@ def _limit(message: Message, default: int = 20) -> int:
 
 def _format_dt(value: object) -> str:
     return value.strftime("%d.%m.%Y %H:%M") if hasattr(value, "strftime") else "—"
+
+
+def _parse_notification_intervals(value: str) -> list[int]:
+    intervals: set[int] = set()
+    for item in value.lower().replace(" ", "").split(","):
+        if not item:
+            continue
+        if item[-1:] not in {"d", "h", "m"}:
+            raise ValueError(
+                "Формат: /admin_set_notification_intervals 7d,3d,1d,12h"
+            )
+        try:
+            amount = int(item[:-1])
+        except ValueError as exc:
+            raise ValueError(
+                "Формат: /admin_set_notification_intervals 7d,3d,1d,12h"
+            ) from exc
+        minutes = amount * {"d": 1440, "h": 60, "m": 1}[item[-1]]
+        if minutes <= 0 or minutes > 525_600:
+            raise ValueError("Интервал должен быть от 1 минуты до 365 дней.")
+        if minutes in intervals:
+            raise ValueError("Интервалы не должны повторяться.")
+        intervals.add(minutes)
+    if not intervals or len(intervals) > 12:
+        raise ValueError("Укажите от 1 до 12 уникальных интервалов.")
+    return sorted(intervals, reverse=True)
+
+
+def _format_interval(minutes: int) -> str:
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440} дн."
+    if minutes % 60 == 0:
+        return f"{minutes // 60} ч."
+    return f"{minutes} мин."
 
 
 def _revoke_result_text(changed: bool, error: str | None) -> str:

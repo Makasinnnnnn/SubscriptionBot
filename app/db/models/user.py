@@ -8,6 +8,7 @@ from app.db.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
     from app.db.models.payment import Payment
+    from app.db.models.promo_redemption import PromoRedemption
     from app.db.models.subscription import Subscription
 
 
@@ -22,3 +23,6 @@ class User(TimestampMixin, Base):
 
     payments: Mapped[list["Payment"]] = relationship(back_populates="user")
     subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user")
+    promo_redemptions: Mapped[list["PromoRedemption"]] = relationship(
+        back_populates="user",
+    )

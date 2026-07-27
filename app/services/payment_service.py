@@ -6,6 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.admin.settings_service import RuntimeSettingsService
+from app.core.config import get_settings
 from app.db.enums import PaymentStatus
 from app.db.models import Payment, Plan, User
 from app.payments.base import InvoiceRequest
@@ -32,6 +34,20 @@ class PaymentService:
             or not authoritative_plan.channel.is_active
         ):
             raise ValueError("Plan is not available")
+        materials_channel_id = await RuntimeSettingsService(self.session).get(
+            RuntimeSettingsService.MATERIALS_CHANNEL_ID,
+            get_settings().materials_channel_id,
+        )
+        try:
+            is_materials_plan = (
+                materials_channel_id is not None
+                and authoritative_plan.channel.telegram_chat_id
+                == int(materials_channel_id)
+            )
+        except (TypeError, ValueError):
+            is_materials_plan = False
+        if is_materials_plan:
+            raise ValueError("Service plan is not available for purchase")
         plan = authoritative_plan
         amount, currency = self._provider_price(plan, provider_name)
         # Serialize invoice creation per user so double-clicks cannot create two provider invoices.

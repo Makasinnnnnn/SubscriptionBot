@@ -10,6 +10,8 @@ from app.db.models.legal_acceptance import LegalAcceptance
 from app.db.models.notification_log import NotificationLog
 from app.db.models.payment import Payment
 from app.db.models.plan import Plan
+from app.db.models.promo_code import PromoCode
+from app.db.models.promo_redemption import PromoRedemption
 from app.db.models.subscription import Subscription
 from app.db.models.user import User
 from app.db.models.webhook_event import WebhookEvent
@@ -27,6 +29,8 @@ __all__ = [
     "NotificationLog",
     "Payment",
     "Plan",
+    "PromoCode",
+    "PromoRedemption",
     "Subscription",
     "User",
     "WebhookEvent",

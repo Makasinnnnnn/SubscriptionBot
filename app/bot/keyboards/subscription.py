@@ -19,6 +19,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="Тарифы", callback_data="plans:list")],
             [InlineKeyboardButton(text="Мои подписки", callback_data="subs:mine")],
+            [InlineKeyboardButton(text="Промокод", callback_data="promo:enter")],
             [InlineKeyboardButton(text="Помощь", callback_data="menu:help")],
             [InlineKeyboardButton(text="Документы", callback_data="legal:menu")],
         ]

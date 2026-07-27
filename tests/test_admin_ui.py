@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.bot.handlers import admin_ui
+from app.bot.handlers.admin_settings import _parse_intervals
 from app.bot.handlers.channels import _part_int
 from app.bot.handlers.admin_ui import (
     _plan_field_value,
@@ -47,6 +48,12 @@ def test_positive_int_range() -> None:
     assert _positive_int("3650", 1, 3650) == 3650
     with pytest.raises(ValueError):
         _positive_int("3651", 1, 3650)
+
+
+def test_notification_intervals_accept_units_and_reject_duplicates() -> None:
+    assert _parse_intervals("7d, 3d, 1d, 12h") == [10080, 4320, 1440, 720]
+    with pytest.raises(ValueError, match="повтор"):
+        _parse_intervals("1d,24h")
 
 
 def test_star_amount_formats_nanostars() -> None:

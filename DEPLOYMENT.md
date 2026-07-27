@@ -25,7 +25,7 @@ docker compose --env-file .env.production -f docker-compose.yml -f docker-compos
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build
 ```
 
-Production validation stops startup when secrets, legal URLs or support details are unsafe.
+Production validation stops startup when secrets, configured legal URLs or support details are unsafe.
 Disabled payment providers do not require credentials.
 
 ## First deployment
@@ -54,10 +54,21 @@ docker compose --env-file .env.production -f docker-compose.yml -f docker-compos
 ## Update and rollback
 
 ```bash
+cd /opt/propgate
 ./scripts/backup_db.sh
 git pull --ff-only
-docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build
+export APP_ENV_FILE=.env.production
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build postgres redis migrations
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build app bot scheduler ops
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml ps
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/health/db
 ```
+
+The `0008_promos_and_reminders` migration adds promo tables and period-aware
+notification fields. Always create and verify a backup before applying it.
+Do not start the new bot or scheduler before the `migrations` service exits
+successfully.
 
 For rollback, stop application services, check out the previous Git revision and rebuild it.
 Restore a pre-release dump only when the old code cannot use the upgraded schema:
@@ -68,6 +79,17 @@ FORCE_RESTORE=true ./scripts/restore_db.sh backups/subscription_YYYYMMDD_HHMMSS.
 
 Restore is destructive. Keep the automatic safety backup and test restoration in a disposable
 database first.
+
+After this release, manually verify:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml logs --tail 100 migrations app bot scheduler ops
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+Open `/admin` and check tariff tabs, promo creation, support contacts,
+reminder intervals and XLSX export. Then redeem a disposable promo with a test
+Telegram account and verify join requests for both channels.
 
 ## Backups, DNS and HTTPS
 

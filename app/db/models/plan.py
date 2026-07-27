@@ -10,6 +10,7 @@ from app.db.models.mixins import TimestampMixin
 if TYPE_CHECKING:
     from app.db.models.channel import Channel
     from app.db.models.payment import Payment
+    from app.db.models.promo_code import PromoCode
 
 
 class Plan(TimestampMixin, Base):
@@ -26,3 +27,4 @@ class Plan(TimestampMixin, Base):
 
     channel: Mapped["Channel"] = relationship(back_populates="plans")
     payments: Mapped[list["Payment"]] = relationship(back_populates="plan")
+    promo_codes: Mapped[list["PromoCode"]] = relationship(back_populates="plan")

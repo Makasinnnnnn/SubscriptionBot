@@ -88,6 +88,7 @@ class SubscriptionService:
         base_expiry = max(now, subscription.expires_at)
         subscription.payment_id = payment.id
         subscription.status = SubscriptionStatus.ACTIVE
+        subscription.period_started_at = base_expiry
         subscription.expires_at = base_expiry + timedelta(days=plan.duration_days)
         subscription.cancelled_at = None
         subscription.revoked_at = None
@@ -150,8 +151,10 @@ class SubscriptionService:
             )
             self.session.add(subscription)
 
+        base_expiry = max(now, subscription.expires_at)
         subscription.status = SubscriptionStatus.ACTIVE
-        subscription.expires_at = max(now, subscription.expires_at) + timedelta(days=days)
+        subscription.period_started_at = base_expiry
+        subscription.expires_at = base_expiry + timedelta(days=days)
         subscription.cancelled_at = None
         subscription.revoked_at = None
         subscription.revoke_reason = None
@@ -173,6 +176,56 @@ class SubscriptionService:
             channel.id,
         )
         return subscription, invite_link
+
+    async def activate_from_promo(
+        self,
+        user: User,
+        plan: Plan,
+        bot: Bot,
+    ) -> tuple[Subscription, InviteLink, str | None]:
+        if not plan.is_active or not plan.channel.is_active:
+            raise ValueError("Promo plan is not active")
+
+        now = _utcnow()
+        subscription = await self._active_subscription(user.id, plan.channel_id)
+        if subscription is None:
+            subscription = Subscription(
+                user_id=user.id,
+                channel_id=plan.channel_id,
+                payment_id=None,
+                status=SubscriptionStatus.ACTIVE,
+                starts_at=now,
+                period_started_at=now,
+                expires_at=now,
+                source="promo",
+            )
+            self.session.add(subscription)
+
+        base_expiry = max(now, subscription.expires_at)
+        subscription.status = SubscriptionStatus.ACTIVE
+        subscription.period_started_at = base_expiry
+        subscription.expires_at = base_expiry + timedelta(days=plan.duration_days)
+        subscription.cancelled_at = None
+        subscription.revoked_at = None
+        subscription.revoke_reason = None
+        subscription.source = "promo"
+        await self.session.flush()
+
+        invite, materials = await self._provision_access_links(
+            subscription,
+            plan.channel,
+            bot,
+            force_new=True,
+        )
+        await self._notify_admins(
+            bot,
+            "subscriptions",
+            "subscription.promo_activated",
+            f"Промокод активировал подписку пользователя {user.telegram_id}.",
+            f"promo:{subscription.id}:{subscription.expires_at.isoformat()}",
+            plan.channel_id,
+        )
+        return subscription, invite, materials
 
     async def revoke(
         self,
@@ -214,8 +267,10 @@ class SubscriptionService:
         if subscription is None:
             raise ValueError("Subscription not found")
         now = _utcnow()
+        base_expiry = max(now, subscription.expires_at)
         subscription.status = SubscriptionStatus.ACTIVE
-        subscription.expires_at = max(now, subscription.expires_at) + timedelta(days=days)
+        subscription.period_started_at = base_expiry
+        subscription.expires_at = base_expiry + timedelta(days=days)
         subscription.cancelled_at = None
         subscription.revoked_at = None
         subscription.revoke_reason = None
@@ -234,12 +289,14 @@ class SubscriptionService:
         subscription_id: int,
         bot: Bot,
     ) -> tuple[Subscription, InviteLink]:
+        now = _utcnow()
         subscription = await self.session.scalar(
             select(Subscription)
             .options(selectinload(Subscription.channel), selectinload(Subscription.invite_link))
             .where(
                 Subscription.id == subscription_id,
                 Subscription.status == SubscriptionStatus.ACTIVE,
+                Subscription.expires_at > now,
             )
             .with_for_update()
         )
@@ -264,7 +321,7 @@ class SubscriptionService:
         )
         if join_request_ready and existing_invite is not None:
             last_refresh = existing_invite.updated_at or existing_invite.created_at
-            if last_refresh and _utcnow() - last_refresh < timedelta(minutes=5):
+            if last_refresh and now - last_refresh < timedelta(minutes=5):
                 raise ValueError("Новые ссылки уже выдавались недавно. Попробуйте через несколько минут.")
         invite, _ = await self._provision_access_links(
             subscription,
@@ -336,56 +393,81 @@ class SubscriptionService:
     async def send_expiration_reminders(
         self,
         bot: Bot | None,
-        days_before: list[int],
+        intervals_minutes: list[int],
     ) -> int:
         if bot is None:
             return 0
 
         now = _utcnow()
-        max_days = max(days_before, default=0)
+        normalized_intervals = sorted(
+            {
+                int(minutes)
+                for minutes in intervals_minutes
+                if 0 < int(minutes) <= 525_600
+            },
+            reverse=True,
+        )
+        max_minutes = max(normalized_intervals, default=0)
+        if max_minutes == 0:
+            return 0
         result = await self.session.scalars(
             select(Subscription)
             .options(selectinload(Subscription.user), selectinload(Subscription.channel))
             .where(
                 Subscription.status == SubscriptionStatus.ACTIVE,
                 Subscription.expires_at > now,
-                Subscription.expires_at <= now + timedelta(days=max_days),
+                Subscription.expires_at <= now + timedelta(minutes=max_minutes),
             )
             .with_for_update(skip_locked=True)
         )
         sent = 0
         for subscription in result:
             remaining = subscription.expires_at - now
-            for days in sorted(days_before, reverse=True):
-                notification_type = f"expires_{days}d"
-                if remaining > timedelta(days=days):
-                    continue
-                if await self._notification_exists(subscription.id, notification_type):
-                    continue
-                try:
-                    await bot.send_message(
-                        subscription.user.telegram_id,
-                        (
-                            f"Подписка на «{subscription.channel.title}» закончится через "
-                            f"{days} дн. Продлите доступ заранее."
-                        ),
-                    )
-                except TelegramAPIError as exc:
-                    logger.warning(
-                        "Subscription reminder failed subscription_id=%s error=%s",
-                        subscription.id,
-                        type(exc).__name__,
-                    )
-                    continue
-                self.session.add(
-                    NotificationLog(
-                        user_id=subscription.user_id,
-                        subscription_id=subscription.id,
-                        type=notification_type,
-                        sent_at=now,
-                    )
+            period_duration = (
+                subscription.expires_at - subscription.period_started_at
+            )
+            candidates = [
+                minutes
+                for minutes in normalized_intervals
+                if timedelta(minutes=minutes) < period_duration
+                and remaining <= timedelta(minutes=minutes)
+            ]
+            if not candidates:
+                continue
+            threshold_minutes = min(candidates)
+            if await self._notification_exists(
+                subscription.id,
+                subscription.expires_at,
+                threshold_minutes,
+            ):
+                continue
+            try:
+                await bot.send_message(
+                    subscription.user.telegram_id,
+                    (
+                        f"Подписка на «{subscription.channel.title}» закончится "
+                        f"{_reminder_interval_text(threshold_minutes)}. "
+                        "Продлите доступ заранее."
+                    ),
                 )
-                sent += 1
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "Subscription reminder failed subscription_id=%s error=%s",
+                    subscription.id,
+                    type(exc).__name__,
+                )
+                continue
+            self.session.add(
+                NotificationLog(
+                    user_id=subscription.user_id,
+                    subscription_id=subscription.id,
+                    type=f"expires_{threshold_minutes}m",
+                    expires_at_snapshot=subscription.expires_at,
+                    threshold_minutes=threshold_minutes,
+                    sent_at=now,
+                )
+            )
+            sent += 1
         await self.session.commit()
         return sent
 
@@ -469,11 +551,26 @@ class SubscriptionService:
             bot,
             force_new=force_new,
         )
-        materials = await self._create_materials_invite(
-            subscription,
-            bot,
-            force_new=force_new,
-        )
+        try:
+            materials = await self._create_materials_invite(
+                subscription,
+                bot,
+                force_new=force_new,
+            )
+        except (TelegramAPIError, ChannelAccessError):
+            if (
+                bot is not None
+                and invite.link
+                and invite.link != previous_primary_link
+            ):
+                await self._revoke_invite_safely(
+                    bot,
+                    channel.telegram_chat_id,
+                    invite.link,
+                    subscription.id,
+                    "primary_compensation",
+                )
+            raise
         if (
             bot is not None
             and previous_primary_link
@@ -809,7 +906,11 @@ class SubscriptionService:
         return AccessChangeResult(subscription, changed, error)
 
     async def _notify_expired(self, subscription: Subscription, bot: Bot | None) -> None:
-        if bot is None or await self._notification_exists(subscription.id, "expired"):
+        if bot is None or await self._notification_exists(
+            subscription.id,
+            subscription.expires_at,
+            0,
+        ):
             return
         try:
             await bot.send_message(
@@ -831,16 +932,24 @@ class SubscriptionService:
                 user_id=subscription.user_id,
                 subscription_id=subscription.id,
                 type="expired",
+                expires_at_snapshot=subscription.expires_at,
+                threshold_minutes=0,
                 sent_at=_utcnow(),
             )
         )
 
-    async def _notification_exists(self, subscription_id: int, notification_type: str) -> bool:
+    async def _notification_exists(
+        self,
+        subscription_id: int,
+        expires_at_snapshot: datetime,
+        threshold_minutes: int,
+    ) -> bool:
         return (
             await self.session.scalar(
                 select(NotificationLog.id).where(
                     NotificationLog.subscription_id == subscription_id,
-                    NotificationLog.type == notification_type,
+                    NotificationLog.expires_at_snapshot == expires_at_snapshot,
+                    NotificationLog.threshold_minutes == threshold_minutes,
                 )
             )
             is not None
@@ -872,3 +981,19 @@ def _invite_expiration(now: datetime, subscription_expiration: datetime, ttl_min
     configured = now + timedelta(minutes=ttl_minutes)
     # Keep join-request links usable for the subscription lifetime, capped by Telegram's limit.
     return min(max(configured, subscription_expiration), now + timedelta(days=366))
+
+
+def _reminder_interval_text(minutes: int) -> str:
+    if minutes % 1440 == 0:
+        days = minutes // 1440
+        suffix = "день" if days % 10 == 1 and days % 100 != 11 else "дней"
+        if days % 10 in {2, 3, 4} and days % 100 not in {12, 13, 14}:
+            suffix = "дня"
+        return f"примерно через {days} {suffix}"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        suffix = "час" if hours % 10 == 1 and hours % 100 != 11 else "часов"
+        if hours % 10 in {2, 3, 4} and hours % 100 not in {12, 13, 14}:
+            suffix = "часа"
+        return f"примерно через {hours} {suffix}"
+    return f"примерно через {minutes} мин."

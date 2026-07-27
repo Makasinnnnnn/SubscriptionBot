@@ -8,9 +8,11 @@ from app.db.models import AppSetting
 
 class RuntimeSettingsService:
     NOTIFICATION_DAYS = "notification_days"
+    NOTIFICATION_INTERVALS_MINUTES = "notification_intervals_minutes"
     INVITE_TTL_MINUTES = "invite_ttl_minutes"
     SCHEDULER_INTERVAL_MINUTES = "scheduler_interval_minutes"
     MATERIALS_CHANNEL_ID = "materials_channel_id"
+    SUPPORT_CONTACTS = "support_contacts"
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -31,9 +33,40 @@ class RuntimeSettingsService:
         await self.session.flush()
         return setting
 
+    async def delete(self, key: str) -> bool:
+        setting = await self.session.scalar(
+            select(AppSetting).where(AppSetting.key == key)
+        )
+        if setting is None:
+            return False
+        await self.session.delete(setting)
+        await self.session.flush()
+        return True
+
     async def notification_days(self, default: list[int]) -> list[int]:
         value = await self.get(self.NOTIFICATION_DAYS, default)
         return sorted({int(day) for day in value if 0 < int(day) <= 365}, reverse=True)
+
+    async def notification_intervals_minutes(
+        self,
+        default: list[int],
+        legacy_days: list[int],
+    ) -> list[int]:
+        sentinel = object()
+        value = await self.get(self.NOTIFICATION_INTERVALS_MINUTES, sentinel)
+        if value is sentinel:
+            legacy = await self.get(self.NOTIFICATION_DAYS, None)
+            value = (
+                [int(day) * 1440 for day in legacy]
+                if legacy
+                else default or [int(day) * 1440 for day in legacy_days]
+            )
+        normalized = {
+            int(minutes)
+            for minutes in value
+            if 0 < int(minutes) <= 525_600
+        }
+        return sorted(normalized, reverse=True)
 
     async def invite_ttl_minutes(self, default: int = 60) -> int:
         return max(5, min(10080, int(await self.get(self.INVITE_TTL_MINUTES, default))))

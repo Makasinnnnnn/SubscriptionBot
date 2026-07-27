@@ -5,10 +5,13 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
 
 from app.bot.handlers.admin import router as admin_router
+from app.bot.handlers.admin_reports import router as admin_reports_router
+from app.bot.handlers.admin_settings import router as admin_settings_router
 from app.bot.handlers.admin_ui import router as admin_ui_router
 from app.bot.handlers.channels import router as channels_router
 from app.bot.handlers.identity import router as identity_router
 from app.bot.handlers.legal import router as legal_router
+from app.bot.handlers.promos import router as promos_router
 from app.bot.handlers.start import router as start_router
 from app.bot.handlers.subscriptions import router as subscriptions_router
 from app.core.config import get_settings
@@ -24,8 +27,11 @@ def build_dispatcher() -> Dispatcher:
     dispatcher.include_router(legal_router)
     dispatcher.include_router(channels_router)
     dispatcher.include_router(admin_ui_router)
+    dispatcher.include_router(admin_reports_router)
+    dispatcher.include_router(admin_settings_router)
     dispatcher.include_router(admin_router)
     dispatcher.include_router(start_router)
+    dispatcher.include_router(promos_router)
     dispatcher.include_router(subscriptions_router)
     return dispatcher
 

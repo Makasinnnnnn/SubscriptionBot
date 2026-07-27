@@ -98,8 +98,9 @@ class WebhookService:
         if result.status == PaymentStatus.PAID:
             provision_failed = False
             try:
-                await self._activate_and_notify(payment)
-            except (TelegramAPIError, ChannelAccessError) as exc:
+                async with self.session.begin_nested():
+                    await self._activate_and_notify(payment)
+            except (TelegramAPIError, ChannelAccessError, ValueError) as exc:
                 provision_failed = True
                 event.error = "access_provision_failed"
                 logger.warning(

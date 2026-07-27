@@ -26,12 +26,18 @@ async def expire_subscriptions_job(bot: Bot | None = None) -> None:
             now = datetime.now(UTC)
             if _last_run is not None and now - _last_run < timedelta(minutes=interval):
                 return
-            _last_run = now
 
-            notification_days = await runtime.notification_days(settings.notification_days)
+            notification_intervals = await runtime.notification_intervals_minutes(
+                settings.notification_intervals_minutes,
+                settings.notification_days,
+            )
             service = SubscriptionService(session)
-            reminders = await service.send_expiration_reminders(bot, notification_days)
+            reminders = await service.send_expiration_reminders(
+                bot,
+                notification_intervals,
+            )
             expired = await service.expire_due_subscriptions(bot)
+            _last_run = now
             logger.info(
                 "Subscription scheduler completed reminders=%s expired=%s",
                 reminders,

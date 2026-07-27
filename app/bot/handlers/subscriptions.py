@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from aiogram import F, Router
@@ -28,7 +29,7 @@ from app.db.enums import PaymentStatus, SubscriptionStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User
 from app.db.session import async_session_factory
 from app.payments.providers import ProviderAPIError, ProviderNotConfiguredError
-from app.services.payment_service import PaymentService
+from app.services.payment_service import PaymentService, set_status_timestamp
 from app.services.legal_service import LegalAcceptanceRequiredError, LegalService
 from app.services.admin_notification_service import AdminNotificationService
 from app.subscriptions.join_requests import JoinRequestService
@@ -158,21 +159,6 @@ async def main_menu(callback: CallbackQuery) -> None:
     await callback.answer()
     if callback.message:
         await callback.message.edit_text("PropGate\n\nВыберите действие:", reply_markup=main_menu_keyboard())
-
-
-@router.callback_query(F.data == "menu:help")
-async def help_menu(callback: CallbackQuery) -> None:
-    await callback.answer()
-    if not callback.message:
-        return
-    await callback.message.edit_text(
-        "Помощь\n\n"
-        "1. Выберите тариф.\n"
-        "2. Оплатите счёт выбранным способом.\n"
-        "3. После подтверждения оплаты бот пришлёт ссылку для входа.\n\n"
-        "Команды: /support — поддержка, /terms — условия использования.",
-        reply_markup=main_menu_keyboard(),
-    )
 
 
 async def _materials_channel_id(session: AsyncSession) -> int | None:
@@ -446,6 +432,7 @@ async def my_subscriptions(callback: CallbackQuery) -> None:
                 .where(
                     Subscription.user_id == user.id,
                     Subscription.status == SubscriptionStatus.ACTIVE,
+                    Subscription.expires_at > datetime.now(UTC).replace(tzinfo=None),
                 )
                 .order_by(Subscription.expires_at.desc())
             )
@@ -493,6 +480,7 @@ async def renew_access_links(callback: CallbackQuery) -> None:
                 .where(
                     Subscription.user_id == user.id,
                     Subscription.status == SubscriptionStatus.ACTIVE,
+                    Subscription.expires_at > datetime.now(UTC).replace(tzinfo=None),
                 )
                 .order_by(Subscription.expires_at.desc())
             )
@@ -565,9 +553,10 @@ async def payment_status(callback: CallbackQuery) -> None:
             return
         if payment.status == PaymentStatus.PAID:
             try:
-                subscription, invite, materials_invite = await SubscriptionService(
-                    session
-                ).activate_from_payment(payment, callback.bot)
+                async with session.begin_nested():
+                    subscription, invite, materials_invite = await SubscriptionService(
+                        session
+                    ).activate_from_payment(payment, callback.bot)
             except (TelegramAPIError, ValueError) as exc:
                 logger.warning(
                     "Paid payment access provisioning failed payment_id=%s "
@@ -576,7 +565,7 @@ async def payment_status(callback: CallbackQuery) -> None:
                     type(exc).__name__,
                     str(exc)[:300],
                 )
-                await session.rollback()
+                await session.commit()
                 await callback.message.edit_text(
                     "Оплата подтверждена, но Telegram пока не выдал ссылку. "
                     "Поддержка уведомлена; повторите проверку позже.",
@@ -628,6 +617,8 @@ async def telegram_stars_pre_checkout(query: PreCheckoutQuery) -> None:
             and payment.plan.channel.is_active
             and payment.plan.stars_price == query.total_amount
         )
+        if valid:
+            valid = await _plan_is_available(session, payment.plan)
     if not valid:
         await query.answer(ok=False, error_message="Параметры счёта изменились. Создай новый счёт.")
         return
@@ -648,24 +639,35 @@ async def telegram_stars_successful_payment(message: Message) -> None:
     async with async_session_factory() as session:
         payment = await session.scalar(
             select(Payment)
-            .options(selectinload(Payment.user))
+            .options(
+                selectinload(Payment.user),
+                selectinload(Payment.subscription),
+            )
             .where(Payment.id == payment_id)
             .with_for_update()
         )
-        if (
+        already_provisioned = (
             payment is not None
             and payment.status == PaymentStatus.PAID
             and payment.provider_payment_id == successful.telegram_payment_charge_id
-        ):
+            and payment.subscription is not None
+        )
+        if already_provisioned:
             await message.answer("Этот платёж уже обработан, доступ ранее был активирован.")
             return
+        retry_paid = (
+            payment is not None
+            and payment.status == PaymentStatus.PAID
+            and payment.provider_payment_id == successful.telegram_payment_charge_id
+            and payment.subscription is None
+        )
         valid = (
             payment is not None
             and payment.provider == "telegram-stars"
-            and payment.status == PaymentStatus.PENDING
             and payment.user.telegram_id == message.from_user.id
             and payment.currency.upper() == successful.currency.upper()
             and payment.amount == successful.total_amount
+            and (payment.status == PaymentStatus.PENDING or retry_paid)
         )
         if not valid:
             await message.answer(
@@ -676,10 +678,12 @@ async def telegram_stars_successful_payment(message: Message) -> None:
         payment.provider_payment_id = successful.telegram_payment_charge_id
         payment.provider_payload = _stars_provider_payload(successful)
         payment.status = PaymentStatus.PAID
+        set_status_timestamp(payment, PaymentStatus.PAID)
         try:
-            subscription, invite, materials_invite = await SubscriptionService(
-                session
-            ).activate_from_payment(payment, message.bot)
+            async with session.begin_nested():
+                subscription, invite, materials_invite = await SubscriptionService(
+                    session
+                ).activate_from_payment(payment, message.bot)
         except (TelegramAPIError, ValueError) as exc:
             await session.commit()
             logger.warning(

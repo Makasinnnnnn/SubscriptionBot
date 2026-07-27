@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     trusted_proxy_ips: list[str] = Field(default_factory=list)
 
     notification_days: list[int] = Field(default_factory=lambda: [3, 1])
+    notification_intervals_minutes: list[int] = Field(
+        default_factory=lambda: [10080, 4320, 1440, 720]
+    )
     scheduler_interval_minutes: int = Field(default=10, ge=1, le=1440)
     dev_channel_id: int | None = None
     dev_admin_id: int | None = None
@@ -70,6 +73,20 @@ class Settings(BaseSettings):
             raise ValueError("YooKassa credentials are required when ENABLE_YOOKASSA=true")
         if any(day <= 0 or day > 365 for day in self.notification_days):
             raise ValueError("NOTIFICATION_DAYS values must be between 1 and 365")
+        if (
+            not self.notification_intervals_minutes
+            or any(
+                value <= 0 or value > 525_600
+                for value in self.notification_intervals_minutes
+            )
+            or len(set(self.notification_intervals_minutes))
+            != len(self.notification_intervals_minutes)
+            or len(self.notification_intervals_minutes) > 12
+        ):
+            raise ValueError(
+                "NOTIFICATION_INTERVALS_MINUTES must contain 1-12 unique values "
+                "between 1 and 525600"
+            )
         if self.app_env != "production":
             return self
 

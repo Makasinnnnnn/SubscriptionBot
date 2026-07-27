@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum, ForeignKey, String
@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from app.db.models.channel import Channel
     from app.db.models.invite_link import InviteLink
     from app.db.models.payment import Payment
+    from app.db.models.promo_redemption import PromoRedemption
     from app.db.models.user import User
 
 
@@ -32,6 +33,9 @@ class Subscription(TimestampMixin, Base):
         index=True,
     )
     starts_at: Mapped[datetime]
+    period_started_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC).replace(tzinfo=None)
+    )
     expires_at: Mapped[datetime] = mapped_column(index=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(default=None)
@@ -42,3 +46,6 @@ class Subscription(TimestampMixin, Base):
     channel: Mapped["Channel"] = relationship(back_populates="subscriptions")
     payment: Mapped["Payment | None"] = relationship(back_populates="subscription")
     invite_link: Mapped["InviteLink | None"] = relationship(back_populates="subscription")
+    promo_redemptions: Mapped[list["PromoRedemption"]] = relationship(
+        back_populates="subscription",
+    )

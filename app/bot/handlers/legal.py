@@ -1,12 +1,12 @@
 from pathlib import Path
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.bot.keyboards.subscription import legal_acceptance_keyboard
-from app.core.config import get_settings
+from app.db.session import async_session_factory
+from app.services.support_service import SupportContactService
 
 router = Router()
 
@@ -83,10 +83,77 @@ async def legal_review(callback: CallbackQuery) -> None:
 
 @router.message(Command("support"))
 async def support(message: Message) -> None:
-    contacts = await _support_targets(message.bot)
     await message.answer(
-        "Выберите контакт поддержки:" if contacts else "Контакт поддержки пока не настроен.",
-        reply_markup=_support_keyboard(contacts) if contacts else None,
+        _support_menu_text(),
+        reply_markup=_support_menu_keyboard(),
+    )
+
+
+@router.callback_query(F.data.in_({"menu:help", "support:menu"}))
+async def support_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            _support_menu_text(),
+            reply_markup=_support_menu_keyboard(),
+        )
+
+
+@router.callback_query(F.data == "support:faq")
+async def support_faq(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "Частые вопросы\n\n"
+            "• Оплата подтверждается автоматически.\n"
+            "• После оплаты бот выдаёт ссылки в оба канала.\n"
+            "• Если вы вышли из канала при активной подписке, откройте "
+            "«Мои подписки» → «Получить доступ снова».\n"
+            "• Если Telegram не принимает заявку, проверьте, что открыта самая "
+            "свежая ссылка.",
+            reply_markup=_support_back_keyboard(),
+        )
+
+
+@router.callback_query(F.data == "support:payment")
+async def support_payment_issue(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "Проблема с оплатой\n\n"
+            "Подготовьте Telegram ID, способ оплаты, примерное время и номер "
+            "платежа. Не отправляйте пароль, код подтверждения или данные карты.",
+            reply_markup=_support_issue_keyboard(),
+        )
+
+
+@router.callback_query(F.data == "support:access")
+async def support_access_issue(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message:
+        await callback.message.edit_text(
+            "Проблема со входом\n\n"
+            "Сначала откройте «Мои подписки» и запросите доступ повторно. "
+            "Если заявка не подтверждается, отправьте поддержке Telegram ID "
+            "и название канала.",
+            reply_markup=_support_issue_keyboard(),
+        )
+
+
+@router.callback_query(F.data == "support:contacts")
+async def support_contacts(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    contacts = await _support_targets(callback.bot)
+    text = (
+        "Выберите контакт поддержки:"
+        if contacts
+        else "Контакт поддержки пока не настроен."
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=_support_keyboard(contacts, back_callback="support:menu"),
     )
 
 
@@ -98,38 +165,81 @@ async def payment_support(message: Message) -> None:
         f"Поддержка по платежам: {contact}\n\n"
         "Telegram не обрабатывает обращения по покупкам в этом боте. "
         "По вопросам оплаты и возврата обращайтесь к владельцу PropGate.",
-        reply_markup=_support_keyboard(contacts) if contacts else None,
+        reply_markup=_support_keyboard(contacts, back_callback="menu:main"),
     )
 
 
 async def _support_targets(bot: Bot) -> list[tuple[str, str]]:
-    settings = get_settings()
-    contacts: list[tuple[str, str]] = []
-    for telegram_id in settings.support_ids:
-        try:
-            chat = await bot.get_chat(telegram_id)
-        except TelegramAPIError:
-            continue
-        if chat.username:
-            target = (f"@{chat.username}", f"https://t.me/{chat.username}")
-            if target not in contacts:
-                contacts.append(target)
-
-    raw_contacts = settings.support_contacts or [settings.support_contact]
-    for raw in raw_contacts:
-        for value in raw.replace(";", ",").split(","):
-            username = value.strip().lstrip("@")
-            target = (f"@{username}", f"https://t.me/{username}")
-            if username and target not in contacts:
-                contacts.append(target)
-    return contacts
+    async with async_session_factory() as session:
+        contacts = await SupportContactService(session).resolved(bot)
+    return [(contact.label, contact.url) for contact in contacts]
 
 
-def _support_keyboard(contacts: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+def _support_keyboard(
+    contacts: list[tuple[str, str]],
+    *,
+    back_callback: str,
+) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=label, url=url)]
-            for label, url in contacts
+            *[
+                [InlineKeyboardButton(text=label, url=url)]
+                for label, url in contacts
+            ],
+            [InlineKeyboardButton(text="Назад", callback_data=back_callback)],
+        ]
+    )
+
+
+def _support_menu_text() -> str:
+    return "Помощь PropGate\n\nВыберите тему обращения:"
+
+
+def _support_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Частые вопросы", callback_data="support:faq")],
+            [
+                InlineKeyboardButton(
+                    text="Проблема с оплатой",
+                    callback_data="support:payment",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Проблема со входом",
+                    callback_data="support:access",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Связаться с поддержкой",
+                    callback_data="support:contacts",
+                )
+            ],
+            [InlineKeyboardButton(text="Назад", callback_data="menu:main")],
+        ]
+    )
+
+
+def _support_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Назад", callback_data="support:menu")],
+        ]
+    )
+
+
+def _support_issue_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Связаться с поддержкой",
+                    callback_data="support:contacts",
+                )
+            ],
+            [InlineKeyboardButton(text="Назад", callback_data="support:menu")],
         ]
     )
 

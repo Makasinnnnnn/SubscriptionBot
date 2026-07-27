@@ -15,7 +15,12 @@ if TYPE_CHECKING:
 class NotificationLog(TimestampMixin, Base):
     __tablename__ = "notification_logs"
     __table_args__ = (
-        UniqueConstraint("subscription_id", "type", name="uq_notification_subscription_type"),
+        UniqueConstraint(
+            "subscription_id",
+            "expires_at_snapshot",
+            "threshold_minutes",
+            name="uq_notification_subscription_period_threshold",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -25,6 +30,8 @@ class NotificationLog(TimestampMixin, Base):
         index=True,
     )
     type: Mapped[str] = mapped_column(String(64), index=True)
+    expires_at_snapshot: Mapped[datetime] = mapped_column(index=True)
+    threshold_minutes: Mapped[int] = mapped_column(index=True)
     sent_at: Mapped[datetime]
 
     user: Mapped["User"] = relationship()

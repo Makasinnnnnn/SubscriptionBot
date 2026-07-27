@@ -6,18 +6,25 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="Тарифы", callback_data="adm:plans"),
-                InlineKeyboardButton(text="Доступ", callback_data="adm:access"),
+                InlineKeyboardButton(text="Доступ", callback_data="rpt:users:all:0"),
             ],
             [
                 InlineKeyboardButton(text="Каналы", callback_data="admin:channels"),
-                InlineKeyboardButton(text="Платежи", callback_data="admin:payments"),
+                InlineKeyboardButton(text="Платежи", callback_data="rpt:pay:all:all:0"),
             ],
             [
-                InlineKeyboardButton(text="Подписки", callback_data="admin:subscriptions"),
+                InlineKeyboardButton(text="Подписки", callback_data="rpt:subs:active:0"),
                 InlineKeyboardButton(text="Статистика", callback_data="admin:stats"),
             ],
             [InlineKeyboardButton(text="Telegram Stars", callback_data="adm:stars")],
-            [InlineKeyboardButton(text="Уведомления", callback_data="adm:notifications")],
+            [
+                InlineKeyboardButton(text="Промокоды", callback_data="cfg:promos:active"),
+                InlineKeyboardButton(text="Поддержка", callback_data="cfg:support"),
+            ],
+            [
+                InlineKeyboardButton(text="Напоминания", callback_data="cfg:reminders"),
+                InlineKeyboardButton(text="Тех. уведомления", callback_data="adm:notifications"),
+            ],
             [InlineKeyboardButton(text="Администраторы", callback_data="admin:admins")],
         ]
     )

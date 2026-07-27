@@ -1,12 +1,16 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from app.db.enums import PaymentStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User, WebhookEvent
 from app.payments.base import PaymentStatusResult
 from app.payments.providers import WebhookVerificationError
 from app.services.webhook_service import WebhookService
+from app.subscriptions.service import SubscriptionService
 
 
 class FakePaidProvider:
@@ -34,6 +38,18 @@ class FakePaidProvider:
 class RejectingProvider:
     async def handle_webhook(self, payload, headers, raw_body):
         raise WebhookVerificationError("forged")
+
+
+@pytest.fixture(autouse=True)
+def disable_real_admin_notifications(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.admin_notification_service.get_settings",
+        lambda: SimpleNamespace(
+            ops_bot_token="",
+            ops_chat_ids=[],
+            admin_ids=[],
+        ),
+    )
 
 
 async def _payment(session) -> Payment:
@@ -81,6 +97,58 @@ async def test_successful_webhook_activates_once(session, monkeypatch) -> None:
     assert second == {"status": "duplicate"}
     assert payment.status == PaymentStatus.PAID
     assert len(subscriptions) == 1
+
+
+@pytest.mark.asyncio
+async def test_paid_webhook_rolls_back_partial_subscription_on_provision_failure(
+    session,
+    monkeypatch,
+) -> None:
+    payment = await _payment(session)
+    provider = FakePaidProvider()
+    monkeypatch.setattr(
+        "app.services.webhook_service.get_payment_provider",
+        lambda _name: provider,
+    )
+    monkeypatch.setattr(WebhookService, "_bot", staticmethod(lambda: None))
+
+    async def fail_after_flush(self, target_payment, bot):
+        now = datetime.now(UTC).replace(tzinfo=None)
+        plan = await self.session.get(Plan, target_payment.plan_id)
+        self.session.add(
+            Subscription(
+                user_id=target_payment.user_id,
+                channel_id=plan.channel_id,
+                payment_id=target_payment.id,
+                starts_at=now,
+                period_started_at=now,
+                expires_at=now + timedelta(days=30),
+            )
+        )
+        await self.session.flush()
+        raise ValueError("telegram provisioning failed")
+
+    monkeypatch.setattr(
+        SubscriptionService,
+        "activate_from_payment",
+        fail_after_flush,
+    )
+
+    result = await WebhookService(session).process(
+        "fake",
+        {"update_id": 7},
+        {},
+        b"partial",
+    )
+
+    assert result == {"status": "ok"}
+    await session.refresh(payment)
+    assert payment.status == PaymentStatus.PAID
+    assert list(await session.scalars(Subscription.__table__.select())) == []
+    event = await session.scalar(
+        select(WebhookEvent).order_by(WebhookEvent.id.desc()).limit(1)
+    )
+    assert event.error == "access_provision_failed"
 
 
 @pytest.mark.asyncio

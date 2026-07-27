@@ -5,7 +5,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from sqlalchemy import func, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,8 +16,17 @@ from app.bot.keyboards.admin import (
     refund_confirmation_keyboard,
 )
 from app.db.enums import PaymentStatus, SubscriptionStatus
-from app.db.models import Channel, Payment, Plan, Subscription, User
+from app.db.models import (
+    Channel,
+    Payment,
+    Plan,
+    PromoCode,
+    PromoRedemption,
+    Subscription,
+    User,
+)
 from app.db.session import async_session_factory
+from app.payments.registry import get_payment_providers
 from app.subscriptions.service import SubscriptionService
 from app.subscriptions.presentation import access_delivery_text
 from app.services.admin_notification_service import (
@@ -55,7 +64,20 @@ async def plans_menu(callback: CallbackQuery, state: FSMContext) -> None:
     if not await _can_manage(callback):
         return
     await callback.answer()
-    await _show_plans(callback)
+    await _show_plans(callback, "active")
+
+
+@router.callback_query(F.data.startswith("adm:plansfilter:"))
+async def plans_filter(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not await _can_manage(callback):
+        return
+    filter_token = (callback.data or "").rsplit(":", 1)[-1]
+    if filter_token not in {"active", "archive", "all"}:
+        await callback.answer("Некорректный фильтр.", show_alert=True)
+        return
+    await callback.answer()
+    await _show_plans(callback, filter_token)
 
 
 @router.callback_query(F.data.startswith("adm:plan:"))
@@ -740,18 +762,21 @@ async def revoke_subscription(callback: CallbackQuery) -> None:
     await _show_user_access(callback, telegram_id)
 
 
-async def _show_plans(callback: CallbackQuery) -> None:
+async def _show_plans(callback: CallbackQuery, filter_token: str = "active") -> None:
     async with async_session_factory() as session:
         channels = await _managed_channels(session, callback.from_user.id)
         channel_ids = [channel.id for channel in channels]
-        plans = list(
-            await session.scalars(
-                select(Plan)
-                .options(selectinload(Plan.channel))
-                .where(Plan.channel_id.in_(channel_ids))
-                .order_by(Plan.channel_id, Plan.is_active.desc(), Plan.price)
-            )
-        ) if channel_ids else []
+        statement = (
+            select(Plan)
+            .options(selectinload(Plan.channel))
+            .where(Plan.channel_id.in_(channel_ids))
+            .order_by(Plan.channel_id, Plan.is_active.desc(), Plan.price)
+        )
+        if filter_token == "active":
+            statement = statement.where(Plan.is_active.is_(True))
+        elif filter_token == "archive":
+            statement = statement.where(Plan.is_active.is_(False))
+        plans = list(await session.scalars(statement)) if channel_ids else []
     rows = [
         [
             InlineKeyboardButton(
@@ -763,11 +788,34 @@ async def _show_plans(callback: CallbackQuery) -> None:
     ]
     rows.extend(
         [
+            [
+                InlineKeyboardButton(
+                    text=f"{'✓ ' if filter_token == 'active' else ''}В продаже",
+                    callback_data="adm:plansfilter:active",
+                ),
+                InlineKeyboardButton(
+                    text=f"{'✓ ' if filter_token == 'archive' else ''}Архив",
+                    callback_data="adm:plansfilter:archive",
+                ),
+                InlineKeyboardButton(
+                    text=f"{'✓ ' if filter_token == 'all' else ''}Все",
+                    callback_data="adm:plansfilter:all",
+                ),
+            ],
             [InlineKeyboardButton(text="Добавить тариф", callback_data="adm:planadd")],
             [InlineKeyboardButton(text="Назад", callback_data="admin:menu")],
         ]
     )
-    await _edit(callback, "Тарифы\n\nВыберите тариф для просмотра и изменения:", InlineKeyboardMarkup(inline_keyboard=rows))
+    filter_label = {
+        "active": "в продаже",
+        "archive": "архив",
+        "all": "все",
+    }[filter_token]
+    await _edit(
+        callback,
+        f"Тарифы: {filter_label}\n\nНайдено: {len(plans)}",
+        InlineKeyboardMarkup(inline_keyboard=rows),
+    )
 
 
 async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
@@ -776,9 +824,98 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
         allowed = plan is not None and await AdminPermissionService(session).can_manage_channel(
             callback.from_user.id, plan.channel_id
         )
+        if plan is not None and allowed:
+            now = func.now()
+            active_subscriptions = int(
+                await session.scalar(
+                    select(func.count(Subscription.id)).where(
+                        Subscription.channel_id == plan.channel_id,
+                        Subscription.status == SubscriptionStatus.ACTIVE,
+                        Subscription.expires_at > now,
+                        or_(
+                            exists(
+                                select(Payment.id).where(
+                                    Payment.id == Subscription.payment_id,
+                                    Payment.plan_id == plan.id,
+                                )
+                            ),
+                            exists(
+                                select(PromoRedemption.id)
+                                .join(PromoCode)
+                                .where(
+                                    PromoRedemption.subscription_id
+                                    == Subscription.id,
+                                    PromoCode.plan_id == plan.id,
+                                )
+                            ),
+                        ),
+                    )
+                )
+                or 0
+            )
+            successful_payments = int(
+                await session.scalar(
+                    select(func.count(Payment.id)).where(
+                        Payment.plan_id == plan.id,
+                        Payment.status.in_(
+                            [PaymentStatus.PAID, PaymentStatus.REFUNDED]
+                        ),
+                    )
+                )
+                or 0
+            )
+            last_purchase = await session.scalar(
+                select(func.max(Payment.paid_at)).where(
+                    Payment.plan_id == plan.id,
+                    Payment.status.in_(
+                        [PaymentStatus.PAID, PaymentStatus.REFUNDED]
+                    ),
+                )
+            )
+            revenue_rows = list(
+                (
+                    await session.execute(
+                        select(
+                            Payment.currency,
+                            func.sum(
+                                case(
+                                    (Payment.status == PaymentStatus.PAID, Payment.amount),
+                                    else_=0,
+                                )
+                            ),
+                        )
+                        .where(
+                            Payment.plan_id == plan.id,
+                            Payment.status.in_(
+                                [PaymentStatus.PAID, PaymentStatus.REFUNDED]
+                            ),
+                        )
+                        .group_by(Payment.currency)
+                        .order_by(Payment.currency)
+                    )
+                ).all()
+            )
     if not allowed or plan is None:
         await callback.answer("Тариф недоступен.", show_alert=True)
         return
+    provider_names = set(get_payment_providers())
+    available_methods = []
+    if "telegram-stars" in provider_names and plan.stars_price:
+        available_methods.append("Stars")
+    if "cryptobot" in provider_names:
+        available_methods.append("Crypto Pay")
+    if "yookassa" in provider_names:
+        available_methods.append("ЮKassa/СБП")
+    if "dev" in provider_names:
+        available_methods.append("Dev")
+    revenue = ", ".join(
+        f"{amount:g} {currency}" for currency, amount in revenue_rows
+    ) or "нет"
+    warning = (
+        "\nПредупреждение: Stars включены, но цена в Stars не задана."
+        if "telegram-stars" in provider_names and not plan.stars_price
+        else ""
+    )
     rows = [
         [
             InlineKeyboardButton(text="Название", callback_data=f"adm:planedit:{plan.id}:title"),
@@ -795,11 +932,31 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
                 callback_data=f"adm:plantoggle:{plan.id}",
             )
         ],
-        [InlineKeyboardButton(text="К списку", callback_data="adm:plans")],
+        [
+            InlineKeyboardButton(
+                text="К списку",
+                callback_data=(
+                    "adm:plansfilter:active"
+                    if plan.is_active
+                    else "adm:plansfilter:archive"
+                ),
+            )
+        ],
     ]
     await _edit(
         callback,
-        f"{plan.channel.title}\n\nТариф: {plan.title}\nСрок: {plan.duration_days} дн.\nЦена: {plan.price:g} {plan.currency}\nЦена Stars: {plan.stars_price or 'не задана'} XTR\nСтатус: {'активен' if plan.is_active else 'в архиве'}",
+        f"{plan.channel.title}\n\n"
+        f"Тариф: {plan.title}\n"
+        f"Срок: {plan.duration_days} дн.\n"
+        f"Цена: {plan.price:g} {plan.currency}\n"
+        f"Цена Stars: {plan.stars_price or 'не задана'} XTR\n"
+        f"Статус: {'в продаже' if plan.is_active else 'в архиве'}\n\n"
+        f"Активных подписок тарифа: {active_subscriptions}\n"
+        f"Успешных платежей тарифа: {successful_payments}\n"
+        f"Последняя покупка: {_format_optional_datetime(last_purchase)}\n"
+        f"Получено: {revenue}\n"
+        f"Оплата: {', '.join(available_methods) or 'нет доступных способов'}"
+        f"{warning}",
         InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -900,6 +1057,7 @@ async def _show_user_access(target: Message | CallbackQuery, telegram_id: int) -
                 .where(
                     Subscription.user_id == user.id,
                     Subscription.status == SubscriptionStatus.ACTIVE,
+                    Subscription.expires_at > func.now(),
                 )
                 .order_by(Subscription.expires_at.desc())
             )
@@ -1010,6 +1168,10 @@ def _star_amount(amount: int, nanostar_amount: int | None) -> str:
         return str(amount)
     fraction = f"{nanostar_amount:09d}".rstrip("0")
     return f"{amount}.{fraction}"
+
+
+def _format_optional_datetime(value) -> str:
+    return value.strftime("%d.%m.%Y %H:%M") if value else "—"
 
 
 def _stars_back_keyboard() -> InlineKeyboardMarkup:

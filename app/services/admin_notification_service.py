@@ -216,45 +216,6 @@ async def notify_runtime(bot: Bot | None, component: str, event: str, detail: st
 
 
 def _format_ops_notification(category: str, event: str, text: str) -> str:
-    now = datetime.now(UTC)
-    titles = {
-        "payments": "PROP GATE / PAYMENT",
-        "subscriptions": "PROP GATE / ACCESS",
-        "refunds": "PROP GATE / REFUND",
-        "errors": "PROP GATE / ALERT",
-        "system": "PROP GATE / SYSTEM",
-    }
-    lines = [titles.get(category, "PROP GATE / LOG"), "=" * 28]
-    if event.startswith("runtime."):
-        session_minute = (now.minute // 5) * 5
-        session_id = now.replace(minute=session_minute, second=0, microsecond=0).strftime(
-            "%Y%m%d-%H%M"
-        )
-        lines.extend(
-            [
-                f"STARTUP SESSION: {session_id}",
-                f"COMPONENT: {_runtime_component(text)}",
-            ]
-        )
-    lines.extend(
-        [
-            f"EVENT: {event}",
-            f"TIME UTC: {now:%Y-%m-%d %H:%M:%S}",
-            "-" * 28,
-            text,
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _runtime_component(text: str) -> str:
-    prefix = "Сервис "
-    if text.startswith(prefix):
-        return text[len(prefix):].split(":", maxsplit=1)[0].upper()
-    return "UNKNOWN"
-
-
-def _format_ops_notification(category: str, event: str, text: str) -> str:
     """Render one compact, Telegram-safe operations message."""
     titles = {
         "payments": "PAYMENT",

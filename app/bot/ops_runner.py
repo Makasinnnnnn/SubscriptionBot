@@ -54,7 +54,7 @@ def _button(text: str, callback_data: str) -> InlineKeyboardButton:
 @router.message(Command("start", "ops"))
 async def ops_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    if not _allowed(message.from_user.id if message.from_user else None, message.chat.id):
+    if not _allowed(message.from_user.id if message.from_user else None):
         return
     await message.answer(
         "PropGate Operations\n\nВыберите раздел. Push приходит только по важным событиям; "
@@ -93,7 +93,7 @@ async def ops_section(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(OpsSearch.query)
 async def ops_search(message: Message, state: FSMContext) -> None:
-    if not _allowed(message.from_user.id if message.from_user else None, message.chat.id):
+    if not _allowed(message.from_user.id if message.from_user else None):
         await state.clear()
         return
     value = (message.text or "").strip()
@@ -298,7 +298,7 @@ async def _health_events_text(status: str) -> str:
 
 def _subscription_lines(items: list[Subscription]) -> list[str]:
     return [
-        f"#{item.id} | @{item.user.username or item.user.telegram_id} | {item.channel.title} | "
+        f"#{item.id} | {_identity(item.user)} | {item.channel.title} | "
         f"{item.status.value} | до {_dt(item.expires_at)}"
         for item in items
     ]
@@ -306,7 +306,7 @@ def _subscription_lines(items: list[Subscription]) -> list[str]:
 
 def _payment_lines(items: list[Payment]) -> list[str]:
     return [
-        f"#{item.id} | @{item.user.username or item.user.telegram_id} | {item.amount:g} {item.currency} | "
+        f"#{item.id} | {_identity(item.user)} | {item.amount:g} {item.currency} | "
         f"{item.provider} | {item.status.value}"
         for item in items
     ]
@@ -316,15 +316,18 @@ def _dt(value: datetime | None) -> str:
     return value.strftime("%d.%m %H:%M") if value else "-"
 
 
-def _allowed(user_id: int | None, chat_id: int) -> bool:
+def _identity(user: User) -> str:
+    return f"@{user.username}" if user.username else f"ID {user.telegram_id}"
+
+
+def _allowed(user_id: int | None) -> bool:
     settings = get_settings()
     allowed = set(settings.ops_chat_ids) | set(settings.admin_ids)
-    return user_id in allowed or chat_id in allowed
+    return user_id in allowed
 
 
 async def _allowed_callback(callback: CallbackQuery) -> bool:
-    chat_id = callback.message.chat.id if callback.message else 0
-    if _allowed(callback.from_user.id, chat_id):
+    if _allowed(callback.from_user.id):
         return True
     await callback.answer("Нет доступа.", show_alert=True)
     return False
