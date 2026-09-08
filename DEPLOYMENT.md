@@ -10,7 +10,7 @@
 - Linux VPS with Docker Engine and Docker Compose;
 - DNS records for `propgate.ru` pointing to the VPS;
 - HTTPS reverse proxy such as Caddy or nginx;
-- a production `.env` created from `.env.production.example`;
+- a production `.env` created from `config/production.example.txt`;
 - Telegram bot administrator rights in every managed channel.
 
 Cloudflare Quick Tunnel is suitable only for temporary local tests and is not a production
@@ -18,7 +18,7 @@ endpoint because its address changes after restart.
 
 ## Local production-like check
 
-Create `.env.production` from `.env.production.example`, replace every placeholder and run:
+Create `.env.production` from `config/production.example.txt`, replace every placeholder and run:
 
 ```powershell
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml config
@@ -33,7 +33,7 @@ Disabled payment providers do not require credentials.
 ```bash
 git clone <repository-url> /opt/propgate
 cd /opt/propgate
-cp .env.production.example .env.production
+cp config/production.example.txt .env.production
 chmod 600 .env.production
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build
 ```

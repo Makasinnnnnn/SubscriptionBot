@@ -98,7 +98,7 @@ PowerShell:
 
 ```powershell
 ssh-keygen -t ed25519 -a 100 -f "$env:USERPROFILE\.ssh\propgate_ed25519"
-scp "$env:USERPROFILE\.ssh\propgate_ed25519.pub" root@212.192.0.127:/root/propgate_ed25519.pub
+scp "$env:USERPROFILE\.ssh\propgate_ed25519.pub" root@192.0.2.10:/root/propgate_ed25519.pub
 ```
 
 Приватный файл `propgate_ed25519` никому не отправлять.
@@ -114,7 +114,7 @@ chmod +x scripts/harden_ssh.sh
 Не закрывать текущую root-сессию. В новом PowerShell проверить:
 
 ```powershell
-ssh -i "$env:USERPROFILE\.ssh\propgate_ed25519" propgate@212.192.0.127
+ssh -i "$env:USERPROFILE\.ssh\propgate_ed25519" propgate@192.0.2.10
 sudo -v
 docker ps
 ```
