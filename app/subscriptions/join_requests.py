@@ -30,9 +30,7 @@ class JoinRequestService:
         now: datetime | None = None,
     ) -> JoinRequestDecision:
         checked_at = now or datetime.now(UTC).replace(tzinfo=None)
-        user = await self.session.scalar(
-            select(User).where(User.telegram_id == telegram_id)
-        )
+        user = await self.session.scalar(select(User).where(User.telegram_id == telegram_id))
         if user is None:
             return JoinRequestDecision(False, "subscription_missing")
 
@@ -45,6 +43,7 @@ class JoinRequestService:
                 )
                 .where(Subscription.user_id == user.id)
                 .order_by(Subscription.expires_at.desc())
+                .execution_options(populate_existing=True)
             )
         )
         if not subscriptions:
@@ -59,18 +58,12 @@ class JoinRequestService:
             mode_enabled = False
             link_revoked = False
             link_expires_at: datetime | None = None
-            if (
-                subscription.channel.telegram_chat_id == chat_id
-                and invite.link == invite_value
-            ):
+            if subscription.channel.telegram_chat_id == chat_id and invite.link == invite_value:
                 access_kind = "primary"
                 mode_enabled = invite.primary_join_request_enabled
                 link_revoked = invite.is_revoked
                 link_expires_at = invite.expire_at
-            elif (
-                invite.materials_channel_id == chat_id
-                and invite.materials_link == invite_value
-            ):
+            elif invite.materials_channel_id == chat_id and invite.materials_link == invite_value:
                 access_kind = "materials"
                 mode_enabled = invite.materials_join_request_enabled
                 link_revoked = invite.materials_is_revoked

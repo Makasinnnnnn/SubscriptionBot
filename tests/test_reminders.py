@@ -59,7 +59,7 @@ async def test_one_day_subscription_skips_long_thresholds_and_sends_12h(
 
     assert sent == 1
     assert len(bot.messages) == 1
-    assert "12 ч" in bot.messages[0][1]
+    assert "UTC" in bot.messages[0][1]
 
 
 @pytest.mark.asyncio
@@ -86,9 +86,7 @@ async def test_scheduler_sends_only_closest_crossed_threshold_and_deduplicates(
     assert (first, second) == (1, 0)
     assert len(bot.messages) == 1
     logs = await session.scalar(
-        select(func.count(NotificationLog.id)).where(
-            NotificationLog.subscription_id == item.id
-        )
+        select(func.count(NotificationLog.id)).where(NotificationLog.subscription_id == item.id)
     )
     assert logs == 1
 

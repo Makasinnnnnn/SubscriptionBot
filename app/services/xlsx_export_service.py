@@ -1,6 +1,7 @@
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from io import BytesIO
+from itertools import islice
 from typing import Any
 
 from openpyxl import Workbook
@@ -38,15 +39,9 @@ def build_xlsx(
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
 
-    row_count = 0
-    for row in rows:
-        if row_count >= MAX_EXPORT_ROWS:
-            break
+    for row in islice(rows, MAX_EXPORT_ROWS):
         sheet.append([safe_excel_value(value) for value in row])
-        row_count += 1
-    sheet.auto_filter.ref = (
-        f"A1:{get_column_letter(len(headers))}{max(1, sheet.max_row)}"
-    )
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, sheet.max_row)}"
 
     for column_index, header in enumerate(headers, start=1):
         values = [

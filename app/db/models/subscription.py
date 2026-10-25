@@ -21,7 +21,9 @@ class Subscription(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"), index=True
+    )
     payment_id: Mapped[int | None] = mapped_column(
         ForeignKey("payments.id", ondelete="RESTRICT"),
         unique=True,

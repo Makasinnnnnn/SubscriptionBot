@@ -5,6 +5,7 @@ Revises: 0004_plan_stars_price
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0005_materials_invite_lifecycle"

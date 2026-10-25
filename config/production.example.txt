@@ -15,15 +15,16 @@ OPS_API_URL=http://app:8000
 ADMIN_IDS=[]
 MATERIALS_CHANNEL_ID=
 MATERIALS_CHANNEL_TITLE=Методички
+ENABLE_BUILTIN_EDUCATION=false
 BOT_DESCRIPTION=PropGate - оплата подписки и управление доступом к закрытым каналам.
 BOT_SHORT_DESCRIPTION=Подписка и доступ к закрытым каналам PropGate.
 
-# Database and Redis
+# Database
 DATABASE_URL=postgresql+asyncpg://subscription:replace-with-db-password@postgres:5432/subscription
 POSTGRES_DB=subscription
 POSTGRES_USER=subscription
 POSTGRES_PASSWORD=replace-with-db-password
-REDIS_URL=redis://redis:6379/0
+POSTGRES_VOLUME_NAME=propgate_postgres_data
 
 # Payment providers
 ENABLE_DEV_PAYMENTS=false

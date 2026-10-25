@@ -6,8 +6,9 @@ Create Date: 2026-07-19
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0001_initial"
 down_revision = None
@@ -35,7 +36,9 @@ def upgrade() -> None:
             create_type=False,
         )
     else:
-        payment_status = sa.Enum("pending", "paid", "failed", "expired", "refunded", name="paymentstatus")
+        payment_status = sa.Enum(
+            "pending", "paid", "failed", "expired", "refunded", name="paymentstatus"
+        )
         subscription_status = sa.Enum("active", "expired", "cancelled", name="subscriptionstatus")
 
     if dialect_name == "postgresql":
@@ -73,7 +76,12 @@ def upgrade() -> None:
     op.create_table(
         "plans",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("channel_id", sa.Integer(), sa.ForeignKey("channels.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "channel_id",
+            sa.Integer(),
+            sa.ForeignKey("channels.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("title", sa.String(length=255), nullable=False),
         sa.Column("duration_days", sa.Integer(), nullable=False),
         sa.Column("price", sa.Numeric(12, 2), nullable=False),
@@ -86,8 +94,12 @@ def upgrade() -> None:
     op.create_table(
         "payments",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("plan_id", sa.Integer(), sa.ForeignKey("plans.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ),
+        sa.Column(
+            "plan_id", sa.Integer(), sa.ForeignKey("plans.id", ondelete="RESTRICT"), nullable=False
+        ),
         sa.Column("provider", sa.String(length=64), nullable=False),
         sa.Column("provider_payment_id", sa.String(length=255)),
         sa.Column("status", payment_status, nullable=False),
@@ -107,9 +119,21 @@ def upgrade() -> None:
     op.create_table(
         "subscriptions",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("channel_id", sa.Integer(), sa.ForeignKey("channels.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("payment_id", sa.Integer(), sa.ForeignKey("payments.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ),
+        sa.Column(
+            "channel_id",
+            sa.Integer(),
+            sa.ForeignKey("channels.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "payment_id",
+            sa.Integer(),
+            sa.ForeignKey("payments.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("status", subscription_status, nullable=False),
         sa.Column("starts_at", sa.DateTime(), nullable=False),
         sa.Column("expires_at", sa.DateTime(), nullable=False),
@@ -124,7 +148,12 @@ def upgrade() -> None:
     op.create_table(
         "invite_links",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("subscription_id", sa.Integer(), sa.ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "subscription_id",
+            sa.Integer(),
+            sa.ForeignKey("subscriptions.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("link", sa.String(length=512), nullable=False),
         sa.Column("expire_at", sa.DateTime()),
         sa.Column("used_at", sa.DateTime()),

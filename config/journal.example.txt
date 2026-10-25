@@ -1,0 +1,25 @@
+# Copy this file to .env.journal at the repository root. Never commit secrets.
+JOURNAL_BOT_TOKEN=
+JOURNAL_ADMIN_IDS=[123456789]
+# Map Telegram user IDs to permitted account IDs. Admins can edit any trade.
+JOURNAL_TRADER_ACCOUNTS={"987654321":["1"]}
+
+# Standalone local development:
+JOURNAL_DATABASE_URL=sqlite+aiosqlite:///journal.db
+# Shared existing PostgreSQL is supported; only journal_* tables are managed:
+# JOURNAL_DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:5432/DATABASE
+
+JOURNAL_SPREADSHEET_ID=1hTq6mZUNivnEsxMi5B4hjDuDhoh7WcQVJ3JRqkiChE8
+JOURNAL_SCREENSHOTS_FOLDER_ID=1Kddiu34NN-hOC3bygiNw02b4MOiBCkzF
+JOURNAL_TRADES_SHEET=Сделки
+JOURNAL_SCREENSHOTS_SHEET=Скриншоты
+JOURNAL_ACCOUNTS_SHEET=Счета
+JOURNAL_TIMEZONE=Asia/Tomsk
+
+# Keep these files OUTSIDE the repository/build context.
+# Defaults: ~/.config/propgate-journal/google.json and client.json
+# JOURNAL_GOOGLE_CREDENTIALS=C:/Users/YOU/.config/propgate-journal/google.json
+# JOURNAL_GOOGLE_CLIENT_SECRET=C:/Users/YOU/.config/propgate-journal/client.json
+JOURNAL_MAX_ATTEMPTS=6
+JOURNAL_SYNC_INTERVAL=5
+JOURNAL_MAX_IMAGE_BYTES=15000000

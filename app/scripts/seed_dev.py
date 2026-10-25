@@ -43,7 +43,7 @@ async def seed_dev() -> None:
                         channel_id=channel.id,
                         title="Dev 30 days",
                         duration_days=30,
-                        price=Decimal("100"),
+                        price=Decimal(100),
                         currency="RUB",
                     )
                 )

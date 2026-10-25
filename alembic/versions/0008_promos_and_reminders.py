@@ -4,8 +4,9 @@ Revision ID: 0008_promos_and_reminders
 Revises: 0007_join_request_invites
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0008_promos_and_reminders"
 down_revision = "0007_join_request_invites"
@@ -19,12 +20,8 @@ def upgrade() -> None:
         sa.Column("period_started_at", sa.DateTime(), nullable=True),
     )
     op.execute("UPDATE subscriptions SET period_started_at = starts_at")
-    op.alter_column(
-        "subscriptions",
-        "period_started_at",
-        existing_type=sa.DateTime(),
-        nullable=False,
-    )
+    with op.batch_alter_table("subscriptions") as batch:
+        batch.alter_column("period_started_at", existing_type=sa.DateTime(), nullable=False)
 
     op.create_table(
         "promo_codes",
@@ -173,28 +170,14 @@ def upgrade() -> None:
         WHERE subscription.id = notification.subscription_id
         """
     )
-    op.alter_column(
-        "notification_logs",
-        "expires_at_snapshot",
-        existing_type=sa.DateTime(),
-        nullable=False,
-    )
-    op.alter_column(
-        "notification_logs",
-        "threshold_minutes",
-        existing_type=sa.Integer(),
-        nullable=False,
-    )
-    op.drop_constraint(
-        "uq_notification_subscription_type",
-        "notification_logs",
-        type_="unique",
-    )
-    op.create_unique_constraint(
-        "uq_notification_subscription_period_threshold",
-        "notification_logs",
-        ["subscription_id", "expires_at_snapshot", "threshold_minutes"],
-    )
+    with op.batch_alter_table("notification_logs") as batch:
+        batch.alter_column("expires_at_snapshot", existing_type=sa.DateTime(), nullable=False)
+        batch.alter_column("threshold_minutes", existing_type=sa.Integer(), nullable=False)
+        batch.drop_constraint("uq_notification_subscription_type", type_="unique")
+        batch.create_unique_constraint(
+            "uq_notification_subscription_period_threshold",
+            ["subscription_id", "expires_at_snapshot", "threshold_minutes"],
+        )
     op.create_index(
         "ix_notification_logs_expires_at_snapshot",
         "notification_logs",
@@ -216,27 +199,24 @@ def downgrade() -> None:
         "ix_notification_logs_expires_at_snapshot",
         table_name="notification_logs",
     )
-    op.drop_constraint(
-        "uq_notification_subscription_period_threshold",
-        "notification_logs",
-        type_="unique",
-    )
     op.execute(
         """
-        DELETE FROM notification_logs AS duplicate
-        USING notification_logs AS retained
-        WHERE duplicate.subscription_id = retained.subscription_id
-          AND duplicate.type = retained.type
-          AND duplicate.id > retained.id
+        DELETE FROM notification_logs
+        WHERE EXISTS (
+            SELECT 1 FROM notification_logs AS retained
+            WHERE notification_logs.subscription_id = retained.subscription_id
+              AND notification_logs.type = retained.type
+              AND notification_logs.id > retained.id
+        )
         """
     )
-    op.create_unique_constraint(
-        "uq_notification_subscription_type",
-        "notification_logs",
-        ["subscription_id", "type"],
-    )
-    op.drop_column("notification_logs", "threshold_minutes")
-    op.drop_column("notification_logs", "expires_at_snapshot")
+    with op.batch_alter_table("notification_logs") as batch:
+        batch.drop_constraint("uq_notification_subscription_period_threshold", type_="unique")
+        batch.create_unique_constraint(
+            "uq_notification_subscription_type", ["subscription_id", "type"]
+        )
+        batch.drop_column("threshold_minutes")
+        batch.drop_column("expires_at_snapshot")
 
     op.drop_table("promo_redemptions")
     op.drop_table("promo_codes")

@@ -3,10 +3,11 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from aiogram.exceptions import TelegramRetryAfter
 from sqlalchemy import select
 
 from app.db.enums import PaymentStatus
-from app.db.models import Channel, Payment, Plan, Subscription, User, WebhookEvent
+from app.db.models import AccessOperation, Channel, Payment, Plan, Subscription, User, WebhookEvent
 from app.payments.base import PaymentStatusResult
 from app.payments.providers import WebhookVerificationError
 from app.services.webhook_service import WebhookService
@@ -16,7 +17,7 @@ from app.subscriptions.service import SubscriptionService
 class FakePaidProvider:
     def __init__(
         self,
-        amount: Decimal = Decimal("100"),
+        amount: Decimal = Decimal(100),
         *,
         provider_payment_id: str = "provider-1",
         currency: str = "RUB",
@@ -61,7 +62,7 @@ async def _payment(session) -> Payment:
         channel_id=channel.id,
         title="30 days",
         duration_days=30,
-        price=Decimal("100"),
+        price=Decimal(100),
         currency="RUB",
     )
     session.add(plan)
@@ -71,13 +72,40 @@ async def _payment(session) -> Payment:
         plan_id=plan.id,
         provider="fake",
         provider_payment_id="provider-1",
-        amount=Decimal("100"),
+        amount=Decimal(100),
         currency="RUB",
         idempotency_key="idem-1",
     )
     session.add(payment)
     await session.commit()
     return payment
+
+
+@pytest.mark.asyncio
+async def test_webhook_retry_after_schedules_delivery_without_losing_payment(session, monkeypatch):
+    payment = await _payment(session)
+    monkeypatch.setattr(
+        "app.services.webhook_service.get_payment_provider", lambda _: FakePaidProvider()
+    )
+    monkeypatch.setattr(WebhookService, "_bot", staticmethod(lambda: None))
+
+    async def limited(self, payment):
+        raise TelegramRetryAfter(method=None, message="synthetic delivery limit", retry_after=120)
+
+    monkeypatch.setattr(WebhookService, "_activate_and_notify", limited)
+    result = await WebhookService(session).process(
+        "fake", {"update_id": 99, "update_type": "invoice_paid"}, {}, b"synthetic"
+    )
+    assert result["status"] == "ok"
+    operation = await session.scalar(
+        select(AccessOperation).where(AccessOperation.payment_id == payment.id)
+    )
+    assert payment.status == PaymentStatus.PAID
+    assert operation.completed_at is None
+    assert operation.attempts == 1
+    assert operation.next_attempt_at > datetime.now(UTC).replace(tzinfo=None) + timedelta(
+        seconds=115
+    )
 
 
 @pytest.mark.asyncio
@@ -145,16 +173,14 @@ async def test_paid_webhook_rolls_back_partial_subscription_on_provision_failure
     await session.refresh(payment)
     assert payment.status == PaymentStatus.PAID
     assert list(await session.scalars(Subscription.__table__.select())) == []
-    event = await session.scalar(
-        select(WebhookEvent).order_by(WebhookEvent.id.desc()).limit(1)
-    )
+    event = await session.scalar(select(WebhookEvent).order_by(WebhookEvent.id.desc()).limit(1))
     assert event.error == "access_provision_failed"
 
 
 @pytest.mark.asyncio
 async def test_webhook_amount_mismatch_is_rejected(session, monkeypatch) -> None:
     payment = await _payment(session)
-    provider = FakePaidProvider(Decimal("101"))
+    provider = FakePaidProvider(Decimal(101))
     monkeypatch.setattr("app.services.webhook_service.get_payment_provider", lambda name: provider)
     service = WebhookService(session)
 
@@ -209,9 +235,7 @@ async def test_refunded_payment_cannot_be_reactivated(session, monkeypatch) -> N
         lambda name: FakePaidProvider(),
     )
 
-    result = await WebhookService(session).process(
-        "fake", {"id": "refunded"}, {}, b"refunded"
-    )
+    result = await WebhookService(session).process("fake", {"id": "refunded"}, {}, b"refunded")
 
     assert result == {"status": "rejected"}
     assert payment.status == PaymentStatus.REFUNDED

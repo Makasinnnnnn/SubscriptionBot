@@ -15,7 +15,9 @@ class InviteLink(TimestampMixin, Base):
     __tablename__ = "invite_links"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    subscription_id: Mapped[int] = mapped_column(ForeignKey("subscriptions.id", ondelete="CASCADE"), unique=True)
+    subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="CASCADE"), unique=True
+    )
     link: Mapped[str] = mapped_column(String(512))
     expire_at: Mapped[datetime | None] = mapped_column(default=None)
     used_at: Mapped[datetime | None] = mapped_column(default=None)

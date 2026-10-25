@@ -22,11 +22,12 @@ from app.bot.keyboards.admin import (
     refund_confirmation_keyboard,
 )
 from app.db.enums import PaymentStatus, SubscriptionStatus
-from app.db.models import Channel, Payment, Plan, Subscription, User
+from app.db.models import Channel, Payment, PaymentApplication, Plan, Subscription, User
 from app.db.session import async_session_factory
+from app.services.access_operation_service import AccessOperationService
+from app.services.xlsx_export_service import MAX_EXPORT_ROWS, build_xlsx
 from app.subscriptions.presentation import access_delivery_text
 from app.subscriptions.service import SubscriptionService
-from app.services.xlsx_export_service import MAX_EXPORT_ROWS, build_xlsx
 
 router = Router()
 PAGE_SIZE = 10
@@ -72,9 +73,7 @@ async def users_report(callback: CallbackQuery) -> None:
         page = min(page, max_page)
         users = list(
             await session.scalars(
-                statement.order_by(User.id.desc())
-                .offset(page * PAGE_SIZE)
-                .limit(PAGE_SIZE)
+                statement.order_by(User.id.desc()).offset(page * PAGE_SIZE).limit(PAGE_SIZE)
             )
         )
     await callback.answer()
@@ -126,7 +125,9 @@ async def users_channel_filter(callback: CallbackQuery) -> None:
             return
         statement = select(Channel).order_by(Channel.title)
         if scope is not None:
-            statement = statement.where(Channel.id.in_(scope)) if scope else statement.where(false())
+            statement = (
+                statement.where(Channel.id.in_(scope)) if scope else statement.where(false())
+            )
         channels = list(await session.scalars(statement))
     await callback.answer()
     rows = [
@@ -178,10 +179,9 @@ async def subscriptions_report(callback: CallbackQuery) -> None:
     rows = [
         [
             InlineKeyboardButton(
-                text=(
-                    f"{_user_identity(item.user)} | {item.channel.title} | "
-                    f"{item.status.value}"
-                )[:64],
+                text=(f"{_user_identity(item.user)} | {item.channel.title} | {item.status.value}")[
+                    :64
+                ],
                 callback_data=f"rpt:sub:{item.id}",
             )
         ]
@@ -421,9 +421,9 @@ async def subscription_refresh_links(callback: CallbackQuery) -> None:
             subscription_id,
             options=[selectinload(Subscription.user)],
         )
-        if subscription is None or not await AdminPermissionService(
-            session
-        ).can_manage_channel(callback.from_user.id, subscription.channel_id):
+        if subscription is None or not await AdminPermissionService(session).can_manage_channel(
+            callback.from_user.id, subscription.channel_id
+        ):
             await callback.answer("Подписка недоступна.", show_alert=True)
             return
         telegram_id = subscription.user.telegram_id
@@ -540,6 +540,7 @@ async def payment_card(callback: CallbackQuery) -> None:
             options=[
                 selectinload(Payment.user),
                 selectinload(Payment.plan).selectinload(Plan.channel),
+                selectinload(Payment.purchased_channel),
                 selectinload(Payment.promo_code),
                 selectinload(Payment.subscription),
             ],
@@ -552,12 +553,12 @@ async def payment_card(callback: CallbackQuery) -> None:
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
         scope = await permission.channel_scope(callback.from_user.id)
-        if scope is not None and payment.plan.channel_id not in scope:
+        if scope is not None and payment.access_channel_id not in scope:
             await callback.answer("Платёж недоступен.", show_alert=True)
             return
         can_manage = await permission.can_manage_channel(
             callback.from_user.id,
-            payment.plan.channel_id,
+            payment.access_channel_id,
         )
     await callback.answer()
     external_id = _masked_external_id(payment.provider_payment_id)
@@ -566,7 +567,7 @@ async def payment_card(callback: CallbackQuery) -> None:
         f"Пользователь: {_user_identity(payment.user)}\n"
         f"Telegram ID: {payment.user.telegram_id}\n"
         f"Тариф: {payment.plan.title}\n"
-        f"Канал: {payment.plan.channel.title}\n"
+        f"Канал: {(payment.purchased_channel or payment.plan.channel).title}\n"
         f"Провайдер: {payment.provider}\n"
         f"Сумма: {payment.amount:g} {payment.currency}\n"
         f"Промокод: {payment.promo_code.code if payment.promo_code else 'нет'}\n"
@@ -602,9 +603,7 @@ async def payment_card(callback: CallbackQuery) -> None:
                 )
             ]
         )
-    rows.append(
-        [InlineKeyboardButton(text="Назад", callback_data="rpt:pay:all:all:0")]
-    )
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="rpt:pay:all:all:0")])
     await _edit(callback, text, InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -626,21 +625,24 @@ async def payment_retry_provision(callback: CallbackQuery) -> None:
         if (
             payment is None
             or payment.status != PaymentStatus.PAID
-            or payment.subscription is not None
             or not await AdminPermissionService(session).can_manage_channel(
                 callback.from_user.id,
-                payment.plan.channel_id,
+                payment.access_channel_id,
             )
         ):
             await callback.answer("Повторная выдача недоступна.", show_alert=True)
             return
+        await AccessOperationService(session).enqueue_payment(payment_id)
         try:
             async with session.begin_nested():
                 subscription, invite, materials = await SubscriptionService(
                     session
                 ).activate_from_payment(payment, callback.bot)
+            await AccessOperationService(session).complete_payment(payment_id)
         except (TelegramAPIError, ValueError) as exc:
-            await session.rollback()
+            await AccessOperationService(session).fail_payment(payment_id, exc)
+            await AccessOperationService(session).enqueue_cleanup(exc)
+            await session.commit()
             await callback.answer(
                 f"Выдача не выполнена: {type(exc).__name__}. Проверьте права бота.",
                 show_alert=True,
@@ -655,13 +657,10 @@ async def payment_retry_provision(callback: CallbackQuery) -> None:
         )
         await session.commit()
         telegram_id = payment.user.telegram_id
-        delivery_text = (
-            "Оплата подтверждена.\n\n"
-            + access_delivery_text(
-                expires_at=subscription.expires_at,
-                primary_link=invite.link,
-                materials_link=materials,
-            )
+        delivery_text = "Оплата подтверждена.\n\n" + access_delivery_text(
+            expires_at=subscription.expires_at,
+            primary_link=invite.link,
+            materials_link=materials,
         )
     delivered = True
     try:
@@ -695,7 +694,7 @@ async def payment_refund_prompt(callback: CallbackQuery) -> None:
             or payment.status != PaymentStatus.PAID
             or not await AdminPermissionService(session).can_manage_channel(
                 callback.from_user.id,
-                payment.plan.channel_id,
+                payment.access_channel_id,
             )
         ):
             await callback.answer("Возврат недоступен.", show_alert=True)
@@ -723,9 +722,7 @@ async def export_report(callback: CallbackQuery) -> None:
         if report_type == "users" and len(parts) == 4:
             statement = _users_statement(parts[3], scope)
             users = list(
-                await session.scalars(
-                    statement.order_by(User.id.desc()).limit(MAX_EXPORT_ROWS + 1)
-                )
+                await session.scalars(statement.order_by(User.id.desc()).limit(MAX_EXPORT_ROWS + 1))
             )
             data = build_xlsx(
                 sheet_name="Пользователи",
@@ -809,6 +806,7 @@ async def export_report(callback: CallbackQuery) -> None:
                     statement.options(
                         selectinload(Payment.user),
                         selectinload(Payment.plan).selectinload(Plan.channel),
+                        selectinload(Payment.purchased_channel),
                         selectinload(Payment.promo_code),
                     )
                     .order_by(Payment.id.desc())
@@ -839,7 +837,7 @@ async def export_report(callback: CallbackQuery) -> None:
                         item.id,
                         item.user.telegram_id,
                         item.user.username or "",
-                        item.plan.channel.title,
+                        (item.purchased_channel or item.plan.channel).title,
                         item.plan.title,
                         item.provider,
                         item.status.value,
@@ -850,11 +848,7 @@ async def export_report(callback: CallbackQuery) -> None:
                         item.refunded_at or "",
                         _masked_external_id(item.provider_payment_id),
                         item.promo_code.code if item.promo_code else "",
-                        (
-                            item.promo_code.discount_percent
-                            if item.promo_code
-                            else ""
-                        ),
+                        (item.promo_code.discount_percent if item.promo_code else ""),
                     )
                     for item in payments[:MAX_EXPORT_ROWS]
                 ],
@@ -926,9 +920,7 @@ def _users_statement(
     active_exists = exists(select(Subscription.id).where(*active_conditions))
     statement = select(User)
     if scope is not None:
-        statement = statement.where(
-            exists(select(Subscription.id).where(*scoped_conditions))
-        )
+        statement = statement.where(exists(select(Subscription.id).where(*scoped_conditions)))
     if filter_token == "active":
         statement = statement.where(active_exists)
     elif filter_token == "inactive":
@@ -994,9 +986,7 @@ def _subscriptions_statement(
             )
         )
     elif filter_token == "cancelled":
-        statement = statement.where(
-            Subscription.status == SubscriptionStatus.CANCELLED
-        )
+        statement = statement.where(Subscription.status == SubscriptionStatus.CANCELLED)
     elif filter_token != "all":
         statement = statement.where(false())
     return statement
@@ -1010,7 +1000,9 @@ def _payments_statement(
     statement = select(Payment)
     if scope is not None:
         statement = (
-            statement.join(Payment.plan).where(Plan.channel_id.in_(scope))
+            statement.join(Payment.plan).where(
+                func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(scope)
+            )
             if scope
             else statement.where(false())
         )
@@ -1024,10 +1016,11 @@ def _payments_statement(
                 and_(
                     Payment.status == PaymentStatus.PAID,
                     ~exists(
-                        select(Subscription.id).where(
-                            Subscription.payment_id == Payment.id
+                        select(PaymentApplication.id).where(
+                            PaymentApplication.payment_id == Payment.id
                         )
                     ),
+                    ~exists(select(Subscription.id).where(Subscription.payment_id == Payment.id)),
                 ),
             )
         )
@@ -1167,9 +1160,7 @@ def _safe_nonnegative_int(value: str) -> int | None:
 def _user_identity(user: User) -> str:
     if user.username:
         return f"@{user.username}"
-    name = " ".join(
-        part for part in (user.first_name, user.last_name) if part
-    ).strip()
+    name = " ".join(part for part in (user.first_name, user.last_name) if part).strip()
     return name or f"ID {user.telegram_id}"
 
 

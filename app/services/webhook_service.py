@@ -12,8 +12,9 @@ from app.core.config import get_settings
 from app.db.enums import PaymentStatus
 from app.db.models import Payment, Plan, User, WebhookEvent
 from app.payments.registry import get_payment_provider
-from app.services.payment_service import set_status_timestamp
+from app.services.access_operation_service import AccessOperationService
 from app.services.admin_notification_service import AdminNotificationService
+from app.services.payment_service import set_status_timestamp
 from app.subscriptions.presentation import access_delivery_text
 from app.subscriptions.service import ChannelAccessError, SubscriptionService
 
@@ -80,6 +81,7 @@ class WebhookService:
             return {"status": "rejected"}
 
         if payment.status == PaymentStatus.PAID and result.status == PaymentStatus.PAID:
+            await AccessOperationService(self.session).enqueue_payment(payment.id)
             event.processed_at = datetime.now(UTC).replace(tzinfo=None)
             await self.session.commit()
             return {"status": "duplicate"}
@@ -96,16 +98,23 @@ class WebhookService:
         payment.provider_payload = result.raw_payload
         set_status_timestamp(payment, result.status)
         if result.status == PaymentStatus.PAID:
+            payment_id = payment.id
+            await AccessOperationService(self.session).enqueue_payment(payment_id)
             provision_failed = False
             try:
                 async with self.session.begin_nested():
-                    await self._activate_and_notify(payment)
+                    delivered = await self._activate_and_notify(payment)
+                if delivered is not False:
+                    await AccessOperationService(self.session).complete_payment(payment_id)
             except (TelegramAPIError, ChannelAccessError, ValueError) as exc:
+                await self.session.refresh(payment)
+                await AccessOperationService(self.session).fail_payment(payment_id, exc)
+                await AccessOperationService(self.session).enqueue_cleanup(exc)
                 provision_failed = True
                 event.error = "access_provision_failed"
                 logger.warning(
                     "Paid payment access provisioning failed payment_id=%s error=%s",
-                    payment.id,
+                    payment_id,
                     type(exc).__name__,
                 )
                 await self._notify_user_access_pending(payment)
@@ -145,10 +154,12 @@ class WebhookService:
         )
         return {"status": "ok"}
 
-    async def _activate_and_notify(self, payment: Payment) -> None:
+    async def _activate_and_notify(self, payment: Payment) -> bool:
         bot = self._bot()
         try:
-            subscription, invite, materials_invite = await SubscriptionService(self.session).activate_from_payment(
+            subscription, invite, materials_invite = await SubscriptionService(
+                self.session
+            ).activate_from_payment(
                 payment,
                 bot,
             )
@@ -171,6 +182,8 @@ class WebhookService:
                         payment.user_id,
                         type(exc).__name__,
                     )
+                    return False
+            return bot is not None
         finally:
             if bot is not None:
                 await bot.session.close()
@@ -195,7 +208,9 @@ class WebhookService:
             obj = payload.get("object") or {}
             object_id = obj.get("id")
             if object_id is not None:
-                source_id = f"{payload.get('event', 'unknown')}:{object_id}:{obj.get('status', 'unknown')}"
+                source_id = (
+                    f"{payload.get('event', 'unknown')}:{object_id}:{obj.get('status', 'unknown')}"
+                )
                 return f"{provider_name}:{source_id}"
         source_id = payload.get("event_id") or payload.get("id")
         if source_id is None:

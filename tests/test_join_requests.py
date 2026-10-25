@@ -9,6 +9,8 @@ from aiogram.types import (
     ChatInviteLink,
     ChatJoinRequest,
     Update,
+)
+from aiogram.types import (
     User as TelegramUser,
 )
 

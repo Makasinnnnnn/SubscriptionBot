@@ -12,6 +12,7 @@ from aiogram.types import (
     LabeledPrice,
     Message,
     PreCheckoutQuery,
+    Update,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,10 +20,11 @@ from sqlalchemy.orm import selectinload
 
 from app.admin.settings_service import RuntimeSettingsService
 from app.bot.keyboards.subscription import (
-    main_menu_keyboard,
     legal_acceptance_keyboard,
+    main_menu_keyboard,
     payment_keyboard,
     payment_providers_keyboard,
+    plan_price_text,
     plans_keyboard,
 )
 from app.core.config import get_settings
@@ -30,10 +32,11 @@ from app.db.enums import PaymentStatus, SubscriptionStatus
 from app.db.models import Channel, Payment, Plan, Subscription, User
 from app.db.session import async_session_factory
 from app.payments.providers import ProviderAPIError, ProviderNotConfiguredError
+from app.services.access_operation_service import AccessOperationService
+from app.services.admin_notification_service import AdminNotificationService
 from app.services.legal_service import LegalAcceptanceRequiredError, LegalService
 from app.services.payment_service import PaymentService, set_status_timestamp
 from app.services.promo_service import PromoRedemptionError
-from app.services.admin_notification_service import AdminNotificationService
 from app.subscriptions.join_requests import JoinRequestService
 from app.subscriptions.presentation import access_delivery_text
 from app.subscriptions.service import SubscriptionService
@@ -43,7 +46,9 @@ logger = logging.getLogger(__name__)
 
 
 @router.chat_join_request()
-async def handle_paid_join_request(request: ChatJoinRequest) -> None:
+async def handle_paid_join_request(
+    request: ChatJoinRequest, event_update: Update | None = None
+) -> None:
     invite_value = request.invite_link.invite_link if request.invite_link else None
     logger.info(
         "event=join_request.received chat_id=%s telegram_id=%s has_invite=%s",
@@ -61,13 +66,33 @@ async def handle_paid_join_request(request: ChatJoinRequest) -> None:
         return
 
     async with async_session_factory() as session:
+        await session.scalar(
+            select(User.id).where(User.telegram_id == request.from_user.id).with_for_update()
+        )
         decision = await JoinRequestService(session).decide(
             telegram_id=request.from_user.id,
             chat_id=request.chat.id,
             invite_value=invite_value,
         )
+        if decision.allowed:
+            operation = await AccessOperationService(session).enqueue_join(
+                request.from_user.id,
+                request.chat.id,
+                invite_value,
+                getattr(request, "date", datetime.now(UTC)),
+                decision.subscription_id,
+                update_id=event_update.update_id if event_update else None,
+            )
+            await session.commit()
+            confirmed = await AccessOperationService(session).execute(operation, request.bot)
+            await session.commit()
 
     if decision.allowed:
+        if not confirmed or operation.last_error:
+            await _report_join_request_api_failure(
+                request, "approve", operation.last_error or "pending"
+            )
+            return
         logger.info(
             "event=join_request.approved chat_id=%s telegram_id=%s "
             "subscription_id=%s access_kind=%s",
@@ -76,13 +101,6 @@ async def handle_paid_join_request(request: ChatJoinRequest) -> None:
             decision.subscription_id,
             decision.access_kind,
         )
-        try:
-            await request.bot.approve_chat_join_request(
-                chat_id=request.chat.id,
-                user_id=request.from_user.id,
-            )
-        except TelegramAPIError as exc:
-            await _report_join_request_api_failure(request, "approve", exc)
         return
 
     logger.warning(
@@ -117,14 +135,14 @@ async def _decline_join_request(request: ChatJoinRequest) -> None:
 async def _report_join_request_api_failure(
     request: ChatJoinRequest,
     action: str,
-    exc: TelegramAPIError,
+    exc: TelegramAPIError | str,
 ) -> None:
-    logger.exception(
+    logger.warning(
         "event=join_request.telegram_failed action=%s chat_id=%s telegram_id=%s error=%s",
         action,
         request.chat.id,
         request.from_user.id,
-        type(exc).__name__,
+        exc if isinstance(exc, str) else type(exc).__name__,
     )
     async with async_session_factory() as session:
         await AdminNotificationService(session, request.bot).notify(
@@ -161,7 +179,9 @@ async def main_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.answer()
     if callback.message:
-        await callback.message.edit_text("PropGate\n\nВыберите действие:", reply_markup=main_menu_keyboard())
+        await callback.message.edit_text(
+            "PropGate\n\nВыберите действие:", reply_markup=main_menu_keyboard()
+        )
 
 
 async def _materials_channel_id(session: AsyncSession) -> int | None:
@@ -188,9 +208,7 @@ async def _available_plans(session: AsyncSession) -> list[Plan]:
     )
     materials_channel_id = await _materials_channel_id(session)
     if materials_channel_id is not None:
-        statement = statement.where(
-            Channel.telegram_chat_id != materials_channel_id
-        )
+        statement = statement.where(Channel.telegram_chat_id != materials_channel_id)
     return list(await session.scalars(statement))
 
 
@@ -243,13 +261,23 @@ async def select_plan(callback: CallbackQuery) -> None:
                 reply_markup=main_menu_keyboard(),
             )
             return
+    keyboard = payment_providers_keyboard(plan)
+    available = any(
+        (button.callback_data or "").startswith("pay:")
+        for row in keyboard.inline_keyboard
+        for button in row
+    )
     await callback.message.edit_text(
         f"{plan.channel.title}\n\n"
         f"{plan.title}\n"
         f"Доступ: {plan.duration_days} дн.\n"
-        f"Стоимость: {plan.price:g} {plan.currency}\n\n"
-        "Выберите способ оплаты:",
-        reply_markup=payment_providers_keyboard(plan),
+        f"Стоимость: {plan_price_text(plan)}\n\n"
+        + (
+            "Выберите способ оплаты:"
+            if available
+            else "Оплата этого тарифа временно недоступна. Откройте «Помощь», чтобы связаться с поддержкой."
+        ),
+        reply_markup=keyboard,
     )
 
 
@@ -270,14 +298,6 @@ async def create_payment(callback: CallbackQuery) -> None:
         return
 
     await _create_payment_flow(callback, plan_id, provider_name, promo_id)
-
-
-@router.callback_query(F.data == "payunavailable:sbp")
-async def unavailable_sbp(callback: CallbackQuery) -> None:
-    await callback.answer(
-        "Оплата через СБП появится после подключения ЮKassa.",
-        show_alert=True,
-    )
 
 
 @router.callback_query(F.data.startswith("legalaccept:"))
@@ -417,7 +437,9 @@ async def confirm_dev_payment(callback: CallbackQuery) -> None:
             return
 
         payment.status = PaymentStatus.PAID
-        subscription, invite, materials_invite = await SubscriptionService(session).activate_from_payment(
+        subscription, invite, materials_invite = await SubscriptionService(
+            session
+        ).activate_from_payment(
             payment,
             callback.bot,
         )
@@ -451,7 +473,9 @@ async def my_subscriptions(callback: CallbackQuery) -> None:
     async with async_session_factory() as session:
         user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
         if user is None:
-            await callback.message.edit_text("Подписок пока нет.", reply_markup=main_menu_keyboard())
+            await callback.message.edit_text(
+                "Подписок пока нет.", reply_markup=main_menu_keyboard()
+            )
             return
         subscriptions = list(
             await session.scalars(
@@ -474,8 +498,7 @@ async def my_subscriptions(callback: CallbackQuery) -> None:
         return
     lines = ["Твои активные подписки:"]
     lines.extend(
-        f"- {subscription.channel.title}: до "
-        f"{subscription.expires_at.strftime('%d.%m.%Y %H:%M')}"
+        f"- {subscription.channel.title}: до {subscription.expires_at.strftime('%d.%m.%Y %H:%M')}"
         for subscription in subscriptions
     )
     await callback.message.edit_text("\n".join(lines), reply_markup=_subscriptions_menu_keyboard())
@@ -499,7 +522,9 @@ async def renew_access_links(callback: CallbackQuery) -> None:
     async with async_session_factory() as session:
         user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
         if user is None:
-            await callback.message.edit_text("Активных подписок пока нет.", reply_markup=main_menu_keyboard())
+            await callback.message.edit_text(
+                "Активных подписок пока нет.", reply_markup=main_menu_keyboard()
+            )
             return
         subscriptions = list(
             await session.scalars(
@@ -514,7 +539,9 @@ async def renew_access_links(callback: CallbackQuery) -> None:
             )
         )
         if not subscriptions:
-            await callback.message.edit_text("Активных подписок пока нет.", reply_markup=main_menu_keyboard())
+            await callback.message.edit_text(
+                "Активных подписок пока нет.", reply_markup=main_menu_keyboard()
+            )
             return
         refreshed: list[tuple[Subscription, Any]] = []
         try:
@@ -549,7 +576,9 @@ async def renew_access_links(callback: CallbackQuery) -> None:
             )
         )
         lines.append("")
-    await callback.message.edit_text("\n".join(lines).strip(), reply_markup=_subscriptions_menu_keyboard())
+    await callback.message.edit_text(
+        "\n".join(lines).strip(), reply_markup=_subscriptions_menu_keyboard()
+    )
 
 
 @router.callback_query(F.data.startswith("payments:status:"))
@@ -569,7 +598,9 @@ async def payment_status(callback: CallbackQuery) -> None:
             await callback.message.edit_text("Платёж не найден.", reply_markup=main_menu_keyboard())
             return
         if payment.provider == "dev":
-            await callback.answer("Используй кнопку подтверждения тестовой оплаты.", show_alert=True)
+            await callback.answer(
+                "Используй кнопку подтверждения тестовой оплаты.", show_alert=True
+            )
             return
         try:
             payment = await PaymentService(session).refresh_status(payment)
@@ -580,15 +611,18 @@ async def payment_status(callback: CallbackQuery) -> None:
             )
             return
         if payment.status == PaymentStatus.PAID:
+            await AccessOperationService(session).enqueue_payment(payment_id)
             try:
                 async with session.begin_nested():
                     subscription, invite, materials_invite = await SubscriptionService(
                         session
                     ).activate_from_payment(payment, callback.bot)
+                await AccessOperationService(session).complete_payment(payment_id)
             except (TelegramAPIError, ValueError) as exc:
+                await AccessOperationService(session).fail_payment(payment_id, exc)
+                await AccessOperationService(session).enqueue_cleanup(exc)
                 logger.warning(
-                    "Paid payment access provisioning failed payment_id=%s "
-                    "error=%s detail=%s",
+                    "Paid payment access provisioning failed payment_id=%s error=%s detail=%s",
                     payment_id,
                     type(exc).__name__,
                     str(exc)[:300],
@@ -596,7 +630,7 @@ async def payment_status(callback: CallbackQuery) -> None:
                 await session.commit()
                 await callback.message.edit_text(
                     "Оплата подтверждена, но Telegram пока не выдал ссылку. "
-                    "Поддержка уведомлена; повторите проверку позже.",
+                    "Повторная выдача запланирована автоматически.",
                     reply_markup=main_menu_keyboard(),
                 )
                 return
@@ -643,9 +677,7 @@ async def telegram_stars_pre_checkout(query: PreCheckoutQuery) -> None:
             and payment.amount == query.total_amount
             and payment.plan.is_active
             and payment.plan.channel.is_active
-            and payment.created_at
-            >= datetime.now(UTC).replace(tzinfo=None)
-            - timedelta(hours=1)
+            and payment.created_at >= datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
         )
         if valid:
             valid = await _plan_is_available(session, payment.plan)
@@ -697,7 +729,7 @@ async def telegram_stars_successful_payment(message: Message) -> None:
             and payment.user.telegram_id == message.from_user.id
             and payment.currency.upper() == successful.currency.upper()
             and payment.amount == successful.total_amount
-            and (payment.status == PaymentStatus.PENDING or retry_paid)
+            and (payment.status in {PaymentStatus.PENDING, PaymentStatus.EXPIRED} or retry_paid)
         )
         if not valid:
             await message.answer(
@@ -705,16 +737,33 @@ async def telegram_stars_successful_payment(message: Message) -> None:
             )
             return
 
+        charge_owner = await session.scalar(
+            select(Payment.id).where(
+                Payment.provider == "telegram-stars",
+                Payment.provider_payment_id == successful.telegram_payment_charge_id,
+                Payment.id != payment_id,
+            )
+        )
+        if charge_owner is not None:
+            await message.answer(
+                "Идентификатор оплаты уже связан с другим счётом. Обратись в поддержку."
+            )
+            return
         payment.provider_payment_id = successful.telegram_payment_charge_id
         payment.provider_payload = _stars_provider_payload(successful)
         payment.status = PaymentStatus.PAID
         set_status_timestamp(payment, PaymentStatus.PAID)
+        await AccessOperationService(session).enqueue_payment(payment_id)
         try:
             async with session.begin_nested():
                 subscription, invite, materials_invite = await SubscriptionService(
                     session
                 ).activate_from_payment(payment, message.bot)
+            await AccessOperationService(session).complete_payment(payment_id)
         except (TelegramAPIError, ValueError) as exc:
+            await session.refresh(payment)
+            await AccessOperationService(session).fail_payment(payment_id, exc)
+            await AccessOperationService(session).enqueue_cleanup(exc)
             await session.commit()
             logger.warning(
                 "Stars access provisioning failed payment_id=%s error=%s",
@@ -753,6 +802,37 @@ async def telegram_stars_successful_payment(message: Message) -> None:
         ),
         reply_markup=main_menu_keyboard(),
     )
+
+
+@router.message(F.refunded_payment)
+async def telegram_stars_refunded_payment(message: Message) -> None:
+    from app.services.refund_service import RefundService
+
+    refunded = message.refunded_payment
+    if refunded is None or message.from_user is None:
+        return
+    try:
+        payment_id = _stars_payment_id(refunded.invoice_payload)
+    except ValueError:
+        return
+    async with async_session_factory() as session:
+        payment = await session.scalar(
+            select(Payment)
+            .options(selectinload(Payment.user))
+            .where(Payment.id == payment_id)
+            .with_for_update()
+        )
+        if (
+            payment is None
+            or payment.provider != "telegram-stars"
+            or payment.user.telegram_id != message.from_user.id
+            or payment.provider_payment_id != refunded.telegram_payment_charge_id
+            or payment.currency.upper() != refunded.currency.upper()
+            or payment.amount != refunded.total_amount
+        ):
+            return
+        await RefundService(session).apply_confirmed(payment, message.bot)
+        await session.commit()
 
 
 async def _ensure_user(message: Message) -> User:

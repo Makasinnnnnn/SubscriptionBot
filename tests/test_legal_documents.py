@@ -1,6 +1,5 @@
 from app.bot.handlers.legal import DOCUMENTS, _document_pages, _plain_markdown
-from app.bot.keyboards.subscription import legal_acceptance_keyboard
-from app.bot.keyboards.subscription import payment_providers_keyboard
+from app.bot.keyboards.subscription import legal_acceptance_keyboard, payment_providers_keyboard
 from app.db.models import Plan
 
 
@@ -28,17 +27,12 @@ def test_discount_promo_survives_legal_and_provider_callbacks() -> None:
         promo_id=34,
     )
     legal_callbacks = [
-        button.callback_data
-        for row in legal_keyboard.inline_keyboard
-        for button in row
+        button.callback_data for row in legal_keyboard.inline_keyboard for button in row
     ]
 
     assert "legaldoc:terms:0:12:telegram-stars:34" in legal_callbacks
     assert "legalaccept:12:telegram-stars:34" in legal_callbacks
-    assert all(
-        callback is None or len(callback.encode()) <= 64
-        for callback in legal_callbacks
-    )
+    assert all(callback is None or len(callback.encode()) <= 64 for callback in legal_callbacks)
 
 
 def test_markdown_heading_is_rendered_as_plain_text() -> None:

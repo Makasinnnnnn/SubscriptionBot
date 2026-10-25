@@ -1,0 +1,13 @@
+# Standalone journal dependencies; uses the same major versions as the host project.
+# Do not include the hash-locked subscription requirements here: pip would require
+# hashes for every additional journal dependency as well.
+aiogram>=3.31.0,<4.0.0
+sqlalchemy[asyncio]>=2.0.0,<3.0.0
+aiosqlite>=0.20.0,<1.0.0
+asyncpg>=0.29.0,<1.0.0
+alembic>=1.13.0,<2.0.0
+pydantic-settings>=2.2.0,<3.0.0
+httpx>=0.27.0,<1.0.0
+google-auth[requests]>=2.38.0,<3.0.0
+google-auth-oauthlib>=1.2.0,<2.0.0
+tzdata>=2025.1

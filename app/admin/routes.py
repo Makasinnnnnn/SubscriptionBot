@@ -39,7 +39,7 @@ async def require_web_admin(
     provided_username = credentials.username if credentials is not None else ""
     provided_password = credentials.password if credentials is not None else ""
     client_host = request.client.host if request.client else "unknown"
-    rate_key = f"{client_host}:{provided_username[:128]}"
+    rate_key = f"admin:{client_host}"
     if await auth_limiter.is_blocked(rate_key, limit=10, window_seconds=300):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -71,23 +71,32 @@ DbSession = Annotated[AsyncSession, Depends(get_session)]
 @router.get("", response_class=HTMLResponse)
 async def dashboard(_: AdminAuth, session: DbSession) -> HTMLResponse:
     users = await session.scalar(select(func.count(User.id))) or 0
-    active_subscriptions = await session.scalar(
-        select(func.count(Subscription.id)).where(
-            Subscription.status == SubscriptionStatus.ACTIVE
+    active_subscriptions = (
+        await session.scalar(
+            select(func.count(Subscription.id)).where(
+                Subscription.status == SubscriptionStatus.ACTIVE
+            )
         )
-    ) or 0
-    paid_payments = await session.scalar(
-        select(func.count(Payment.id)).where(Payment.status == PaymentStatus.PAID)
-    ) or 0
-    failed_webhooks = await session.scalar(
-        select(func.count(WebhookEvent.id)).where(WebhookEvent.error.is_not(None))
-    ) or 0
+        or 0
+    )
+    paid_payments = (
+        await session.scalar(
+            select(func.count(Payment.id)).where(Payment.status == PaymentStatus.PAID)
+        )
+        or 0
+    )
+    failed_webhooks = (
+        await session.scalar(
+            select(func.count(WebhookEvent.id)).where(WebhookEvent.error.is_not(None))
+        )
+        or 0
+    )
     body = (
         '<section class="metrics">'
-        f'{_metric("Пользователи", users)}'
-        f'{_metric("Активные подписки", active_subscriptions)}'
-        f'{_metric("Успешные платежи", paid_payments)}'
-        f'{_metric("Webhook с ошибкой", failed_webhooks)}'
+        f"{_metric('Пользователи', users)}"
+        f"{_metric('Активные подписки', active_subscriptions)}"
+        f"{_metric('Успешные платежи', paid_payments)}"
+        f"{_metric('Webhook с ошибкой', failed_webhooks)}"
         "</section>"
         '<section class="panel"><h2>Быстрые действия</h2>'
         "<p>Изменения доступа и настроек выполняются командами в Telegram-админке. "
@@ -105,7 +114,12 @@ async def users_page(
 ) -> HTMLResponse:
     users = list(await session.scalars(select(User).order_by(User.id.desc()).limit(limit)))
     rows = [
-        (user.id, user.telegram_id, f"@{user.username}" if user.username else "—", user.first_name or "—")
+        (
+            user.id,
+            user.telegram_id,
+            f"@{user.username}" if user.username else "—",
+            user.first_name or "—",
+        )
         for user in users
     ]
     return HTMLResponse(
@@ -232,9 +246,7 @@ async def webhooks_page(
     limit: int = Query(100, ge=1, le=500),
 ) -> HTMLResponse:
     events = list(
-        await session.scalars(
-            select(WebhookEvent).order_by(WebhookEvent.id.desc()).limit(limit)
-        )
+        await session.scalars(select(WebhookEvent).order_by(WebhookEvent.id.desc()).limit(limit))
     )
     rows = [
         (
@@ -261,9 +273,7 @@ async def audit_page(
     session: DbSession,
     limit: int = Query(100, ge=1, le=500),
 ) -> HTMLResponse:
-    logs = list(
-        await session.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(limit))
-    )
+    logs = list(await session.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)))
     rows = [
         (
             log.id,

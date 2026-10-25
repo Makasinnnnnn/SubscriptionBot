@@ -3,6 +3,8 @@ import logging
 from datetime import UTC, datetime
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
+from aiohttp import ClientError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,7 +48,7 @@ class AdminNotificationService:
             try:
                 notification_bot = Bot(ops_bot_token)
                 owns_bot = True
-            except Exception as exc:
+            except ValueError as exc:
                 logger.warning("Ops bot initialization failed error=%s", type(exc).__name__)
                 return 0
         if notification_bot is None:
@@ -64,9 +66,7 @@ class AdminNotificationService:
                     continue
                 try:
                     message_text = (
-                        _format_ops_notification(category, event, text)
-                        if ops_bot_token
-                        else text
+                        _format_ops_notification(category, event, text) if ops_bot_token else text
                     )
                     await notification_bot.send_message(
                         telegram_id,
@@ -74,7 +74,7 @@ class AdminNotificationService:
                         parse_mode="HTML" if ops_bot_token else None,
                         disable_notification=category == "system",
                     )
-                except Exception as exc:
+                except (TelegramAPIError, ClientError, OSError) as exc:
                     logger.warning(
                         "Admin notification failed category=%s event=%s error=%s",
                         category,
@@ -106,7 +106,7 @@ class AdminNotificationService:
             if owns_bot:
                 try:
                     await notification_bot.session.close()
-                except Exception as exc:
+                except (ClientError, OSError) as exc:
                     logger.warning("Ops bot session close failed error=%s", type(exc).__name__)
         logger.info(
             "Admin notifications processed category=%s event=%s recipients=%s sent=%s",
@@ -153,9 +153,7 @@ class AdminNotificationService:
 
     async def _recipients(self, category: str, channel_id: int | None) -> list[int]:
         db_ids = list(
-            await self.session.scalars(
-                select(Admin.telegram_id).where(Admin.is_active.is_(True))
-            )
+            await self.session.scalars(select(Admin.telegram_id).where(Admin.is_active.is_(True)))
         )
         candidates = set(db_ids) | set(get_settings().admin_ids)
         permission = AdminPermissionService(self.session)
@@ -190,7 +188,6 @@ class AdminNotificationService:
 async def notify_runtime(bot: Bot | None, component: str, event: str, detail: str = "") -> None:
     from app.db.session import async_session_factory
 
-    # Routine container restarts are visible in Docker/systemd; keep them out of the ops chat.
     if not detail and component.lower() in {"api", "bot", "scheduler"}:
         return
     try:
@@ -206,7 +203,7 @@ async def notify_runtime(bot: Bot | None, component: str, event: str, detail: st
                 f"{component}:{event}:{timestamp}",
             )
             await session.commit()
-    except Exception as exc:
+    except (SQLAlchemyError, TelegramAPIError, ClientError, OSError, ValueError) as exc:
         logger.warning(
             "Runtime notification failed component=%s event=%s error=%s",
             component,

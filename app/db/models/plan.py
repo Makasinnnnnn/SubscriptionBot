@@ -17,10 +17,12 @@ class Plan(TimestampMixin, Base):
     __tablename__ = "plans"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[int] = mapped_column(
+        ForeignKey("channels.id", ondelete="CASCADE"), index=True
+    )
     title: Mapped[str] = mapped_column(String(255))
     duration_days: Mapped[int] = mapped_column(Integer)
-    price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    price: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     currency: Mapped[str] = mapped_column(String(8), default="RUB")
     stars_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

@@ -87,7 +87,7 @@ async def _promo_fixture(
         channel_id=channel.id,
         title="Month",
         duration_days=30,
-        price=Decimal("4990"),
+        price=Decimal(4990),
         currency="RUB",
         stars_price=500,
     )
@@ -155,7 +155,7 @@ async def test_promo_offer_quotes_discount_without_granting_access(session) -> N
 
     assert offer.promo.id == promo.id
     assert offer.promo.plan_id == plan.id
-    assert offer.base_amount == Decimal("4990")
+    assert offer.base_amount == Decimal(4990)
     assert offer.discounted_amount == Decimal("3992.00")
     assert offer.base_stars == 500
     assert offer.discounted_stars == 400
@@ -208,7 +208,7 @@ async def test_promo_is_consumed_only_after_paid_access_is_provisioned(
         provider="fake",
         provider_payment_id="paid-1",
         status=PaymentStatus.PAID,
-        amount=Decimal("3992"),
+        amount=Decimal(3992),
         currency="RUB",
         idempotency_key="promo-paid-1",
     )
@@ -275,7 +275,7 @@ async def test_pending_invoice_reserves_global_and_per_user_limits(
             promo_code_id=promo.id,
             provider="fake",
             provider_payment_id="pending-1",
-            amount=Decimal("3992"),
+            amount=Decimal(3992),
             currency="RUB",
             idempotency_key="promo-pending-1",
         )
@@ -312,7 +312,7 @@ async def test_failed_materials_invite_does_not_consume_discount_promo(
         provider="fake",
         provider_payment_id="paid-failing",
         status=PaymentStatus.PAID,
-        amount=Decimal("3992"),
+        amount=Decimal(3992),
         currency="RUB",
         idempotency_key="promo-failing",
     )
@@ -345,7 +345,7 @@ async def test_paid_discount_payment_records_redemption_after_access(
         provider="fake",
         provider_payment_id="paid-success",
         status=PaymentStatus.PAID,
-        amount=Decimal("3992"),
+        amount=Decimal(3992),
         currency="RUB",
         idempotency_key="promo-success",
     )
@@ -359,9 +359,7 @@ async def test_paid_discount_payment_records_redemption_after_access(
     await session.commit()
 
     redemption = await session.scalar(
-        select(PromoRedemption).where(
-            PromoRedemption.payment_id == payment.id
-        )
+        select(PromoRedemption).where(PromoRedemption.payment_id == payment.id)
     )
     assert redemption is not None
     assert redemption.subscription_id == subscription.id
@@ -369,9 +367,9 @@ async def test_paid_discount_payment_records_redemption_after_access(
 
 
 def test_discount_rounding_and_minimum_amount() -> None:
-    assert discounted_amount(Decimal("4990"), "RUB", 20) == Decimal("3992.00")
-    assert discounted_amount(Decimal("101"), "XTR", 25) == Decimal("76")
-    assert discounted_amount(Decimal("1"), "XTR", 99) == Decimal("1")
+    assert discounted_amount(Decimal(4990), "RUB", 20) == Decimal("3992.00")
+    assert discounted_amount(Decimal(101), "XTR", 25) == Decimal(76)
+    assert discounted_amount(Decimal(1), "XTR", 99) == Decimal(1)
 
 
 def _utcnow() -> datetime:

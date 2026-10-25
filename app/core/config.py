@@ -1,13 +1,15 @@
-from functools import lru_cache
 import ipaddress
 import re
+from functools import lru_cache
 
 from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
+    )
 
     app_name: str = "SubscriptionBot"
     app_env: str = "development"
@@ -29,7 +31,10 @@ class Settings(BaseSettings):
     enable_cryptobot: bool = False
     enable_yookassa: bool = False
 
-    database_url: str = "postgresql+asyncpg://subscription:subscription@postgres:5432/subscription"
+    database_url: str = Field(
+        default="postgresql+asyncpg://subscription:subscription@postgres:5432/subscription",
+        repr=False,
+    )
 
     yookassa_shop_id: str = ""
     yookassa_secret_key: str = Field(default="", repr=False)
@@ -59,6 +64,7 @@ class Settings(BaseSettings):
     support_ids: list[int] = Field(default_factory=list)
     materials_channel_id: int | None = None
     materials_channel_title: str = "Методички"
+    enable_builtin_education: bool = False
     bot_description: str = "PropGate - оплата подписки и управление доступом к закрытому каналу."
     bot_short_description: str = "Подписка и доступ к закрытому каналу PropGate."
     backup_retention_count: int = Field(default=14, ge=1, le=365)
@@ -75,10 +81,7 @@ class Settings(BaseSettings):
             raise ValueError("NOTIFICATION_DAYS values must be between 1 and 365")
         if (
             not self.notification_intervals_minutes
-            or any(
-                value <= 0 or value > 525_600
-                for value in self.notification_intervals_minutes
-            )
+            or any(value <= 0 or value > 525_600 for value in self.notification_intervals_minutes)
             or len(set(self.notification_intervals_minutes))
             != len(self.notification_intervals_minutes)
             or len(self.notification_intervals_minutes) > 12
@@ -102,16 +105,20 @@ class Settings(BaseSettings):
             errors.append("ADMIN_IDS must contain at least one superadmin")
         if self.materials_channel_id is None:
             errors.append("MATERIALS_CHANNEL_ID is required for the second paid channel")
-        if (
-            len(self.webhook_secret) < 32
-            or any(item in self.webhook_secret.lower() for item in placeholders)
+        if len(self.webhook_secret) < 32 or any(
+            item in self.webhook_secret.lower() for item in placeholders
         ):
-            errors.append("WEBHOOK_SECRET must be a non-placeholder value of at least 32 characters")
+            errors.append(
+                "WEBHOOK_SECRET must be a non-placeholder value of at least 32 characters"
+            )
         elif not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", self.webhook_secret):
             errors.append("WEBHOOK_SECRET must be URL-safe and at most 128 characters")
-        if len(self.admin_password) < 16 or self.admin_password.lower() in {
-            "admin", "password", "changeme", "replace-with-a-long-password"
-        } or any(item in self.admin_password.lower() for item in placeholders):
+        if (
+            len(self.admin_password) < 16
+            or self.admin_password.lower()
+            in {"admin", "password", "changeme", "replace-with-a-long-password"}
+            or any(item in self.admin_password.lower() for item in placeholders)
+        ):
             errors.append("ADMIN_PASSWORD must be a non-default value of at least 16 characters")
         database_url = self.database_url.lower()
         if not database_url.startswith("postgresql+"):
@@ -143,7 +150,9 @@ class Settings(BaseSettings):
             try:
                 ipaddress.ip_network(value, strict=False)
             except ValueError:
-                errors.append("TRUSTED_PROXY_IPS and YOOKASSA_ALLOWED_IPS must contain valid networks")
+                errors.append(
+                    "TRUSTED_PROXY_IPS and YOOKASSA_ALLOWED_IPS must contain valid networks"
+                )
                 break
         for name, value in {
             "TERMS_URL": self.terms_url,

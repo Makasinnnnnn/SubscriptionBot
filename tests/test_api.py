@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 from base64 import b64encode
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient

@@ -1,4 +1,4 @@
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -9,6 +9,7 @@ from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.admin.pricing import parse_plan_price, validate_plan_price
 from app.admin.service import AdminPermissionService
 from app.bot.keyboards.admin import (
     admin_cancel_keyboard,
@@ -27,12 +28,12 @@ from app.db.models import (
 )
 from app.db.session import async_session_factory
 from app.payments.registry import get_payment_providers
-from app.subscriptions.service import SubscriptionService
-from app.subscriptions.presentation import access_delivery_text
 from app.services.admin_notification_service import (
-    AdminNotificationService,
     NOTIFICATION_CATEGORIES,
+    AdminNotificationService,
 )
+from app.subscriptions.presentation import access_delivery_text
+from app.subscriptions.service import SubscriptionService
 
 router = Router()
 
@@ -131,7 +132,9 @@ async def add_plan_channel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(PlanForm.title)
     await state.update_data(channel_id=channel_id)
-    await _edit(callback, "Введите название тарифа, например: 30 дней", admin_cancel_keyboard("adm:plans"))
+    await _edit(
+        callback, "Введите название тарифа, например: 30 дней", admin_cancel_keyboard("adm:plans")
+    )
 
 
 @router.message(PlanForm.title)
@@ -145,7 +148,10 @@ async def add_plan_title(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(title=title)
     await state.set_state(PlanForm.duration)
-    await message.answer("Введите срок действия в днях, например: 30", reply_markup=admin_cancel_keyboard("adm:plans"))
+    await message.answer(
+        "Введите срок действия в днях, например: 30",
+        reply_markup=admin_cancel_keyboard("adm:plans"),
+    )
 
 
 @router.message(PlanForm.duration)
@@ -171,7 +177,7 @@ async def add_plan_price(message: Message, state: FSMContext) -> None:
     try:
         price = _price(message.text)
     except ValueError:
-        await message.answer("Введите цену от 0.01 до 9999999999.99.")
+        await message.answer("Введите положительную цену не выше 9999999999.99.")
         return
     await state.update_data(price=str(price))
     await state.set_state(PlanForm.currency)
@@ -198,8 +204,10 @@ async def add_plan_currency(callback: CallbackQuery, state: FSMContext) -> None:
         return
     data = await state.get_data()
     price = Decimal(data["price"])
-    if currency == "XTR" and price != price.to_integral_value():
-        await callback.answer("Для Stars цена должна быть целым числом.", show_alert=True)
+    try:
+        price = validate_plan_price(price, currency)
+    except ValueError as exc:
+        await callback.answer(str(exc), show_alert=True)
         return
     async with async_session_factory() as session:
         if not await AdminPermissionService(session).can_manage_channel(
@@ -213,6 +221,7 @@ async def add_plan_currency(callback: CallbackQuery, state: FSMContext) -> None:
             duration_days=data["duration_days"],
             price=price,
             currency=currency,
+            stars_price=int(price) if currency == "XTR" else None,
         )
         session.add(plan)
         await session.flush()
@@ -274,21 +283,29 @@ async def edit_plan_value(message: Message, state: FSMContext) -> None:
         return
     async with async_session_factory() as session:
         plan = await session.get(Plan, plan_id)
-        if plan is None or message.from_user is None or not await AdminPermissionService(
-            session
-        ).can_manage_channel(message.from_user.id, plan.channel_id):
+        if (
+            plan is None
+            or message.from_user is None
+            or not await AdminPermissionService(session).can_manage_channel(
+                message.from_user.id, plan.channel_id
+            )
+        ):
             await state.clear()
             await message.answer("Тариф недоступен.", reply_markup=admin_menu_keyboard())
             return
         model_field = "duration_days" if field == "duration" else field
-        if field == "price" and plan.currency == "XTR" and value != value.to_integral_value():
-            await message.answer("Для Stars цена должна быть целым числом.")
-            return
-        if field == "currency" and value == "XTR" and plan.price != plan.price.to_integral_value():
-            await message.answer("Сначала установите целую цену, затем выберите XTR.")
+        try:
+            if field == "price":
+                value = validate_plan_price(value, plan.currency)
+            elif field == "currency":
+                validate_plan_price(plan.price, value)
+        except ValueError as exc:
+            await message.answer(str(exc))
             return
         old_value = str(getattr(plan, model_field))
         setattr(plan, model_field, value)
+        if plan.currency == "XTR" and field in {"price", "currency"}:
+            plan.stars_price = int(plan.price)
         await AdminPermissionService(session).audit(
             message.from_user.id,
             "plan.update",
@@ -363,28 +380,35 @@ async def stars_dashboard(callback: CallbackQuery) -> None:
     if not await _can_manage(callback):
         return
     await callback.answer()
-    try:
-        balance, telegram_transactions = await _telegram_stars_data(callback)
-    except TelegramAPIError:
-        await _edit(
-            callback,
-            "Telegram Stars\n\nНе удалось получить баланс из Telegram. Попробуйте ещё раз позже.",
-            _stars_back_keyboard(),
+    async with async_session_factory() as session:
+        global_access = await AdminPermissionService(session).can_manage_all_channels(
+            callback.from_user.id
         )
-        return
+    balance = None
+    telegram_transactions = None
+    if global_access:
+        try:
+            balance, telegram_transactions = await _telegram_stars_data(callback)
+        except TelegramAPIError:
+            await _edit(
+                callback,
+                "Telegram Stars\n\nНе удалось получить баланс из Telegram. Попробуйте ещё раз позже.",
+                _stars_back_keyboard(),
+            )
+            return
 
     async with async_session_factory() as session:
         channels = await _managed_channels(session, callback.from_user.id)
         channel_ids = [channel.id for channel in channels]
-        received = Decimal("0")
-        refunded = Decimal("0")
+        received = Decimal(0)
+        refunded = Decimal(0)
         payments: list[Payment] = []
         if channel_ids:
             received = await session.scalar(
                 select(func.coalesce(func.sum(Payment.amount), 0))
                 .join(Payment.plan)
                 .where(
-                    Plan.channel_id.in_(channel_ids),
+                    func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(channel_ids),
                     Payment.provider == "telegram-stars",
                     Payment.status.in_([PaymentStatus.PAID, PaymentStatus.REFUNDED]),
                 )
@@ -393,7 +417,7 @@ async def stars_dashboard(callback: CallbackQuery) -> None:
                 select(func.coalesce(func.sum(Payment.amount), 0))
                 .join(Payment.plan)
                 .where(
-                    Plan.channel_id.in_(channel_ids),
+                    func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(channel_ids),
                     Payment.provider == "telegram-stars",
                     Payment.status == PaymentStatus.REFUNDED,
                 )
@@ -404,7 +428,9 @@ async def stars_dashboard(callback: CallbackQuery) -> None:
                     .join(Payment.plan)
                     .options(selectinload(Payment.user), selectinload(Payment.plan))
                     .where(
-                        Plan.channel_id.in_(channel_ids),
+                        func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(
+                            channel_ids
+                        ),
                         Payment.provider == "telegram-stars",
                     )
                     .order_by(Payment.created_at.desc())
@@ -415,20 +441,21 @@ async def stars_dashboard(callback: CallbackQuery) -> None:
     lines = [
         "Telegram Stars",
         "",
-        f"Баланс бота: {_star_amount(balance.amount, balance.nanostar_amount)} XTR",
-        f"Получено по платежам: {received:g} XTR",
-        f"Возвращено: {refunded:g} XTR",
-        f"Чистая сумма в базе: {received - refunded:g} XTR",
+        f"Получено по платежам: {_star_amount(received, None)} XTR",
+        f"Возвращено: {_star_amount(refunded, None)} XTR",
+        f"Чистая сумма в базе: {_star_amount(received - refunded, None)} XTR",
         "",
-        "Последние операции Telegram:",
     ]
-    if telegram_transactions.transactions:
-        lines.extend(
-            f"{transaction.date:%d.%m %H:%M} | {transaction.amount:+d} XTR | {transaction.id[:12]}"
-            for transaction in telegram_transactions.transactions[:8]
-        )
-    else:
-        lines.append("Операций пока нет.")
+    if balance is not None and telegram_transactions is not None:
+        lines.insert(2, f"Баланс бота: {_star_amount(balance.amount, balance.nanostar_amount)} XTR")
+        lines.append("Последние операции Telegram:")
+        if telegram_transactions.transactions:
+            lines.extend(
+                f"{transaction.date:%d.%m %H:%M} | {transaction.amount:+d} XTR | {transaction.id[:12]}"
+                for transaction in telegram_transactions.transactions[:8]
+            )
+        else:
+            lines.append("Операций пока нет.")
 
     rows = []
     refundable = [payment for payment in payments if payment.status == PaymentStatus.PAID]
@@ -527,20 +554,26 @@ async def stars_refunds(callback: CallbackQuery) -> None:
     async with async_session_factory() as session:
         channels = await _managed_channels(session, callback.from_user.id)
         channel_ids = [channel.id for channel in channels]
-        payments = list(
-            await session.scalars(
-                select(Payment)
-                .join(Payment.plan)
-                .options(selectinload(Payment.user), selectinload(Payment.plan))
-                .where(
-                    Plan.channel_id.in_(channel_ids),
-                    Payment.provider == "telegram-stars",
-                    Payment.status == PaymentStatus.PAID,
+        payments = (
+            list(
+                await session.scalars(
+                    select(Payment)
+                    .join(Payment.plan)
+                    .options(selectinload(Payment.user), selectinload(Payment.plan))
+                    .where(
+                        func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(
+                            channel_ids
+                        ),
+                        Payment.provider == "telegram-stars",
+                        Payment.status == PaymentStatus.PAID,
+                    )
+                    .order_by(Payment.paid_at.desc())
+                    .limit(20)
                 )
-                .order_by(Payment.paid_at.desc())
-                .limit(20)
             )
-        ) if channel_ids else []
+            if channel_ids
+            else []
+        )
     rows = [
         [
             InlineKeyboardButton(
@@ -553,7 +586,7 @@ async def stars_refunds(callback: CallbackQuery) -> None:
     rows.append([InlineKeyboardButton(text="Назад", callback_data="adm:stars")])
     await _edit(
         callback,
-        "Возврат Stars\n\nВыберите оплаченный заказ. После подтверждения доступ пользователя будет отозван:",
+        "Возврат Stars\n\nВыберите оплаченный заказ. После подтверждения будет убран неиспользованный срок этой оплаты:",
         InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -572,7 +605,7 @@ async def stars_refund_request(callback: CallbackQuery) -> None:
             and payment.provider == "telegram-stars"
             and payment.status == PaymentStatus.PAID
             and await AdminPermissionService(session).can_manage_channel(
-                callback.from_user.id, payment.plan.channel_id
+                callback.from_user.id, payment.access_channel_id
             )
         )
     if not allowed or payment is None:
@@ -581,7 +614,7 @@ async def stars_refund_request(callback: CallbackQuery) -> None:
     await callback.answer()
     await _edit(
         callback,
-        f"Вернуть {payment.amount:g} XTR по платежу #{payment.id}?\n\nПосле возврата доступ пользователя будет отозван.",
+        f"Вернуть {payment.amount:g} XTR по платежу #{payment.id}?\n\nБудет убран неиспользованный срок этой оплаты. Остальные периоды сохранятся.",
         refund_confirmation_keyboard(payment.id),
     )
 
@@ -655,18 +688,20 @@ async def grant_days_received(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     async with async_session_factory() as session:
-        if message.from_user is None or not await AdminPermissionService(session).can_manage_channel(
-            message.from_user.id, data["channel_id"]
-        ):
+        if message.from_user is None or not await AdminPermissionService(
+            session
+        ).can_manage_channel(message.from_user.id, data["channel_id"]):
             await message.answer("Нет доступа к каналу.")
             return
         try:
             subscription, invite = await SubscriptionService(session).grant_manual(
                 data["telegram_id"], data["channel_id"], days, message.bot
             )
-        except (ValueError, TelegramAPIError) as exc:
+        except (ValueError, TelegramAPIError):
             await session.rollback()
-            await message.answer(f"Не удалось выдать доступ: {exc}")
+            await message.answer(
+                "Не удалось выдать доступ. Проверьте настройки канала и права бота, затем повторите попытку."
+            )
             return
         await AdminPermissionService(session).audit(
             message.from_user.id,
@@ -688,9 +723,14 @@ async def grant_days_received(message: Message, state: FSMContext) -> None:
                 ),
             )
         except TelegramAPIError:
-            await message.answer("Не удалось отправить ссылки пользователю.", reply_markup=admin_menu_keyboard())
+            await message.answer(
+                "Не удалось отправить ссылки пользователю.", reply_markup=admin_menu_keyboard()
+            )
         else:
-            await message.answer("Доступ к обоим каналам выдан и отправлен одним сообщением.", reply_markup=admin_menu_keyboard())
+            await message.answer(
+                "Доступ к обоим каналам выдан и отправлен одним сообщением.",
+                reply_markup=admin_menu_keyboard(),
+            )
         return
     try:
         await message.bot.send_message(
@@ -700,7 +740,10 @@ async def grant_days_received(message: Message, state: FSMContext) -> None:
         delivery = "Ссылка отправлена пользователю."
     except TelegramAPIError:
         delivery = f"Передайте ссылку вручную: {invite.link}"
-    await message.answer(f"Доступ выдан до {subscription.expires_at:%d.%m.%Y %H:%M}.\n{delivery}", reply_markup=admin_menu_keyboard())
+    await message.answer(
+        f"Доступ выдан до {subscription.expires_at:%d.%m.%Y %H:%M}.\n{delivery}",
+        reply_markup=admin_menu_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("adm:revoke:"))
@@ -843,8 +886,7 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
                                 select(PromoRedemption.id)
                                 .join(PromoCode)
                                 .where(
-                                    PromoRedemption.subscription_id
-                                    == Subscription.id,
+                                    PromoRedemption.subscription_id == Subscription.id,
                                     PromoCode.plan_id == plan.id,
                                 )
                             ),
@@ -857,9 +899,7 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
                 await session.scalar(
                     select(func.count(Payment.id)).where(
                         Payment.plan_id == plan.id,
-                        Payment.status.in_(
-                            [PaymentStatus.PAID, PaymentStatus.REFUNDED]
-                        ),
+                        Payment.status.in_([PaymentStatus.PAID, PaymentStatus.REFUNDED]),
                     )
                 )
                 or 0
@@ -867,9 +907,7 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
             last_purchase = await session.scalar(
                 select(func.max(Payment.paid_at)).where(
                     Payment.plan_id == plan.id,
-                    Payment.status.in_(
-                        [PaymentStatus.PAID, PaymentStatus.REFUNDED]
-                    ),
+                    Payment.status.in_([PaymentStatus.PAID, PaymentStatus.REFUNDED]),
                 )
             )
             revenue_rows = list(
@@ -886,9 +924,7 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
                         )
                         .where(
                             Payment.plan_id == plan.id,
-                            Payment.status.in_(
-                                [PaymentStatus.PAID, PaymentStatus.REFUNDED]
-                            ),
+                            Payment.status.in_([PaymentStatus.PAID, PaymentStatus.REFUNDED]),
                         )
                         .group_by(Payment.currency)
                         .order_by(Payment.currency)
@@ -905,12 +941,10 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
     if "cryptobot" in provider_names:
         available_methods.append("Crypto Pay")
     if "yookassa" in provider_names:
-        available_methods.append("ЮKassa/СБП")
+        available_methods.append("ЮKassa")
     if "dev" in provider_names:
         available_methods.append("Dev")
-    revenue = ", ".join(
-        f"{amount:g} {currency}" for currency, amount in revenue_rows
-    ) or "нет"
+    revenue = ", ".join(f"{amount:g} {currency}" for currency, amount in revenue_rows) or "нет"
     warning = (
         "\nПредупреждение: Stars включены, но цена в Stars не задана."
         if "telegram-stars" in provider_names and not plan.stars_price
@@ -925,7 +959,11 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
             InlineKeyboardButton(text="Цена", callback_data=f"adm:planedit:{plan.id}:price"),
             InlineKeyboardButton(text="Валюта", callback_data=f"adm:planedit:{plan.id}:currency"),
         ],
-        [InlineKeyboardButton(text="Цена в Stars", callback_data=f"adm:planedit:{plan.id}:stars_price")],
+        [
+            InlineKeyboardButton(
+                text="Цена в Stars", callback_data=f"adm:planedit:{plan.id}:stars_price"
+            )
+        ],
         [
             InlineKeyboardButton(
                 text="Архивировать" if plan.is_active else "Вернуть в продажу",
@@ -936,9 +974,7 @@ async def _show_plan(callback: CallbackQuery, plan_id: int) -> None:
             InlineKeyboardButton(
                 text="К списку",
                 callback_data=(
-                    "adm:plansfilter:active"
-                    if plan.is_active
-                    else "adm:plansfilter:archive"
+                    "adm:plansfilter:active" if plan.is_active else "adm:plansfilter:archive"
                 ),
             )
         ],
@@ -975,7 +1011,11 @@ async def _show_grant_channels(
         )
         return
     rows = [
-        [InlineKeyboardButton(text=channel.title[:64], callback_data=f"adm:grantch:{telegram_id}:{channel.id}")]
+        [
+            InlineKeyboardButton(
+                text=channel.title[:64], callback_data=f"adm:grantch:{telegram_id}:{channel.id}"
+            )
+        ]
         for channel in channels
     ]
     rows.append([InlineKeyboardButton(text="Отмена", callback_data="adm:access")])
@@ -995,19 +1035,13 @@ async def _show_access_users(callback: CallbackQuery, page: int) -> None:
         users_query = select(User).order_by(User.id.desc())
         count_query = select(func.count(User.id))
         if scope is not None:
-            visible_users = select(Subscription.user_id).where(
-                Subscription.channel_id.in_(scope)
-            )
+            visible_users = select(Subscription.user_id).where(Subscription.channel_id.in_(scope))
             users_query = users_query.where(User.id.in_(visible_users))
             count_query = count_query.where(User.id.in_(visible_users))
         total = await session.scalar(count_query) or 0
         max_page = max(0, (total - 1) // page_size)
         page = min(max(page, 0), max_page)
-        users = list(
-            await session.scalars(
-                users_query.offset(page * page_size).limit(page_size)
-            )
-        )
+        users = list(await session.scalars(users_query.offset(page * page_size).limit(page_size)))
 
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
@@ -1027,9 +1061,13 @@ async def _show_access_users(callback: CallbackQuery, page: int) -> None:
 
     navigation: list[InlineKeyboardButton] = []
     if page > 0:
-        navigation.append(InlineKeyboardButton(text="Назад", callback_data=f"adm:accesspage:{page - 1}"))
+        navigation.append(
+            InlineKeyboardButton(text="Назад", callback_data=f"adm:accesspage:{page - 1}")
+        )
     if page < max_page:
-        navigation.append(InlineKeyboardButton(text="Далее", callback_data=f"adm:accesspage:{page + 1}"))
+        navigation.append(
+            InlineKeyboardButton(text="Далее", callback_data=f"adm:accesspage:{page + 1}")
+        )
     if navigation:
         rows.append(navigation)
     rows.extend(
@@ -1050,21 +1088,26 @@ async def _show_user_access(target: Message | CallbackQuery, telegram_id: int) -
     actor_id = target.from_user.id
     async with async_session_factory() as session:
         user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
-        subscriptions = [] if user is None else list(
-            await session.scalars(
-                select(Subscription)
-                .options(selectinload(Subscription.channel))
-                .where(
-                    Subscription.user_id == user.id,
-                    Subscription.status == SubscriptionStatus.ACTIVE,
-                    Subscription.expires_at > func.now(),
+        subscriptions = (
+            []
+            if user is None
+            else list(
+                await session.scalars(
+                    select(Subscription)
+                    .options(selectinload(Subscription.channel))
+                    .where(
+                        Subscription.user_id == user.id,
+                        Subscription.status == SubscriptionStatus.ACTIVE,
+                        Subscription.expires_at > func.now(),
+                    )
+                    .order_by(Subscription.expires_at.desc())
                 )
-                .order_by(Subscription.expires_at.desc())
             )
         )
         permissions = AdminPermissionService(session)
         subscriptions = [
-            item for item in subscriptions
+            item
+            for item in subscriptions
             if await permissions.can_manage_channel(actor_id, item.channel_id)
         ]
     lines = [f"Пользователь: {telegram_id}"]
@@ -1087,7 +1130,11 @@ async def _show_user_access(target: Message | CallbackQuery, telegram_id: int) -
         lines.append("\nАктивных подписок нет.")
     rows.extend(
         [
-            [InlineKeyboardButton(text="Выдать доступ", callback_data=f"adm:grantuser:{telegram_id}")],
+            [
+                InlineKeyboardButton(
+                    text="Выдать доступ", callback_data=f"adm:grantuser:{telegram_id}"
+                )
+            ],
             [InlineKeyboardButton(text="Назад", callback_data="adm:access")],
         ]
     )
@@ -1111,10 +1158,16 @@ async def grant_known_user(callback: CallbackQuery) -> None:
 
 async def _managed_channels(session, telegram_id: int) -> list[Channel]:
     channels = list(
-        await session.scalars(select(Channel).where(Channel.is_active.is_(True)).order_by(Channel.title))
+        await session.scalars(
+            select(Channel).where(Channel.is_active.is_(True)).order_by(Channel.title)
+        )
     )
     permissions = AdminPermissionService(session)
-    return [channel for channel in channels if await permissions.can_manage_channel(telegram_id, channel.id)]
+    return [
+        channel
+        for channel in channels
+        if await permissions.can_manage_channel(telegram_id, channel.id)
+    ]
 
 
 async def _resolve_user_reference(
@@ -1163,9 +1216,9 @@ async def _telegram_stars_data(callback: CallbackQuery):
     return balance, transactions
 
 
-def _star_amount(amount: int, nanostar_amount: int | None) -> str:
+def _star_amount(amount: int | Decimal, nanostar_amount: int | None) -> str:
     if not nanostar_amount:
-        return str(amount)
+        return format(Decimal(amount).normalize(), "f")
     fraction = f"{nanostar_amount:09d}".rstrip("0")
     return f"{amount}.{fraction}"
 
@@ -1194,7 +1247,9 @@ async def _edit(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMark
 
 def _plan_return_keyboard(plan_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Вернуться к тарифу", callback_data=f"adm:plan:{plan_id}")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Вернуться к тарифу", callback_data=f"adm:plan:{plan_id}")]
+        ]
     )
 
 
@@ -1218,13 +1273,7 @@ def _positive_int(raw: str | None, minimum: int, maximum: int) -> int:
 
 
 def _price(raw: str | None) -> Decimal:
-    try:
-        value = Decimal((raw or "").strip().replace(",", ".")).quantize(Decimal("0.01"))
-    except InvalidOperation as exc:
-        raise ValueError from exc
-    if not Decimal("0.01") <= value <= Decimal("9999999999.99"):
-        raise ValueError
-    return value
+    return parse_plan_price(raw)
 
 
 def _plan_field_value(field: str, raw: str):
@@ -1241,7 +1290,7 @@ def _plan_field_value(field: str, raw: str):
         try:
             return _price(raw)
         except ValueError as exc:
-            raise ValueError("Введите цену от 0.01 до 9999999999.99.") from exc
+            raise ValueError("Введите положительную цену не выше 9999999999.99.") from exc
     if field == "stars_price":
         try:
             return _positive_int(raw, 1, 10_000_000)

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from app.db.models import (
     InviteLink,
     NotificationLog,
     Payment,
+    PaymentApplication,
     Plan,
     Subscription,
     User,
@@ -47,8 +49,25 @@ class SubscriptionService:
         payment: Payment,
         bot: Bot | None = None,
     ) -> tuple[Subscription, InviteLink, str | None]:
+        if payment.status == PaymentStatus.REFUNDED:
+            raise ValueError("Refunded payment cannot grant access")
+        payment = await self.session.scalar(
+            select(Payment)
+            .options(selectinload(Payment.user), selectinload(Payment.plan))
+            .where(Payment.id == payment.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if payment is None or payment.status == PaymentStatus.REFUNDED:
+            raise ValueError("Refunded or missing payment cannot grant access")
         await self.session.scalar(
             select(User.id).where(User.id == payment.user_id).with_for_update()
+        )
+        application = await self.session.scalar(
+            select(PaymentApplication)
+            .where(PaymentApplication.payment_id == payment.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         existing_for_payment = await self.session.scalar(
             select(Subscription)
@@ -56,11 +75,26 @@ class SubscriptionService:
                 selectinload(Subscription.invite_link),
                 selectinload(Subscription.channel),
             )
-            .where(Subscription.payment_id == payment.id)
+            .where(
+                Subscription.id == application.subscription_id
+                if application is not None
+                else Subscription.payment_id == payment.id
+            )
             .with_for_update()
         )
         if existing_for_payment is not None:
-            if existing_for_payment.status != SubscriptionStatus.ACTIVE:
+            if (
+                application is not None
+                and application.legacy
+                and existing_for_payment.payment_id != payment.id
+            ):
+                raise ValueError("Historical payment application requires manual reconciliation")
+            if application is not None and application.reversed_at is not None:
+                raise ValueError("Payment has already been refunded")
+            if (
+                existing_for_payment.status != SubscriptionStatus.ACTIVE
+                or existing_for_payment.expires_at <= _utcnow()
+            ):
                 raise ValueError("Payment subscription has already been revoked")
             payment.status = PaymentStatus.PAID
             payment.paid_at = payment.paid_at or _utcnow()
@@ -76,19 +110,24 @@ class SubscriptionService:
             return existing_for_payment, invite_link, materials_invite
 
         plan = await self.session.scalar(
-            select(Plan)
-            .options(selectinload(Plan.channel))
-            .where(Plan.id == payment.plan_id)
+            select(Plan).options(selectinload(Plan.channel)).where(Plan.id == payment.plan_id)
         )
         if plan is None:
             raise ValueError("Payment plan not found")
 
+        if payment.metadata_json.get("terms_origin") == "migration_catalog_unverified":
+            raise ValueError("Historical purchase terms require manual reconciliation")
         now = _utcnow()
-        subscription = await self._active_subscription(payment.user_id, plan.channel_id)
+        channel_id = payment.purchased_channel_id or plan.channel_id
+        duration_days = payment.purchased_duration_days or plan.duration_days
+        channel = await self.session.get(Channel, channel_id)
+        if channel is None or duration_days <= 0:
+            raise ValueError("Purchased access terms are invalid")
+        subscription = await self._active_subscription(payment.user_id, channel_id)
         if subscription is None:
             subscription = existing_for_payment or Subscription(
                 user_id=payment.user_id,
-                channel_id=plan.channel_id,
+                channel_id=channel_id,
                 starts_at=now,
                 expires_at=now,
             )
@@ -98,7 +137,7 @@ class SubscriptionService:
         subscription.payment_id = payment.id
         subscription.status = SubscriptionStatus.ACTIVE
         subscription.period_started_at = base_expiry
-        subscription.expires_at = base_expiry + timedelta(days=plan.duration_days)
+        subscription.expires_at = base_expiry + timedelta(days=duration_days)
         subscription.cancelled_at = None
         subscription.revoked_at = None
         subscription.revoke_reason = None
@@ -106,10 +145,21 @@ class SubscriptionService:
         payment.status = PaymentStatus.PAID
         payment.paid_at = payment.paid_at or now
         await self.session.flush()
+        self.session.add(
+            PaymentApplication(
+                payment_id=payment.id,
+                subscription_id=subscription.id,
+                days_granted=duration_days,
+                applied_at=now,
+                starts_at=base_expiry,
+                expires_at=subscription.expires_at,
+            )
+        )
+        await self.session.flush()
 
         invite_link, materials_invite = await self._provision_access_links(
             subscription,
-            plan.channel,
+            channel,
             bot,
             force_new=True,
         )
@@ -123,7 +173,7 @@ class SubscriptionService:
             "subscription.activated",
             f"Доступ выдан пользователю {payment.user_id} по платежу #{payment.id}.",
             f"payment:{payment.id}",
-            plan.channel_id,
+            channel_id,
         )
         return subscription, invite_link, materials_invite
 
@@ -146,9 +196,7 @@ class SubscriptionService:
             user = User(telegram_id=telegram_id)
             self.session.add(user)
             await self.session.flush()
-        await self.session.scalar(
-            select(User.id).where(User.id == user.id).with_for_update()
-        )
+        await self.session.scalar(select(User.id).where(User.id == user.id).with_for_update())
 
         now = _utcnow()
         subscription = await self._active_subscription(user.id, channel.id)
@@ -205,10 +253,23 @@ class SubscriptionService:
                 selectinload(Subscription.invite_link),
             )
             .where(Subscription.id == subscription_id)
-            .with_for_update()
         )
         if subscription is None:
             raise ValueError("Subscription not found")
+        await self.session.scalar(
+            select(User.id).where(User.id == subscription.user_id).with_for_update()
+        )
+        subscription = await self.session.scalar(
+            select(Subscription)
+            .options(
+                selectinload(Subscription.user),
+                selectinload(Subscription.channel),
+                selectinload(Subscription.invite_link),
+            )
+            .where(Subscription.id == subscription_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if subscription.status != SubscriptionStatus.ACTIVE:
             return AccessChangeResult(subscription, False)
         return await self._revoke_loaded(subscription, bot, reason, status)
@@ -221,6 +282,11 @@ class SubscriptionService:
     ) -> tuple[Subscription, InviteLink]:
         if days <= 0:
             raise ValueError("Days must be greater than zero")
+        user_id = await self.session.scalar(
+            select(Subscription.user_id).where(Subscription.id == subscription_id)
+        )
+        if user_id is not None:
+            await self.session.scalar(select(User.id).where(User.id == user_id).with_for_update())
         subscription = await self.session.scalar(
             select(Subscription)
             .options(selectinload(Subscription.channel), selectinload(Subscription.invite_link))
@@ -285,7 +351,9 @@ class SubscriptionService:
         if join_request_ready and existing_invite is not None:
             last_refresh = existing_invite.updated_at or existing_invite.created_at
             if last_refresh and now - last_refresh < timedelta(minutes=5):
-                raise ValueError("Новые ссылки уже выдавались недавно. Попробуйте через несколько минут.")
+                raise ValueError(
+                    "Новые ссылки уже выдавались недавно. Попробуйте через несколько минут."
+                )
         invite, _ = await self._provision_access_links(
             subscription,
             subscription.channel,
@@ -316,6 +384,7 @@ class SubscriptionService:
             )
             .order_by(Subscription.expires_at.desc())
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if subscription is None:
             raise ValueError("Active subscription not found")
@@ -326,10 +395,15 @@ class SubscriptionService:
             SubscriptionStatus.CANCELLED,
         )
 
-    async def expire_due_subscriptions(self, bot: Bot | None = None) -> int:
+    async def expire_due_subscriptions(
+        self, bot: Bot | None = None, *, defer_telegram: bool = False
+    ) -> int:
+        from app.services.access_operation_service import AccessOperationService
+
         now = _utcnow()
         result = await self.session.scalars(
             select(Subscription)
+            .join(User, User.id == Subscription.user_id)
             .options(
                 selectinload(Subscription.user),
                 selectinload(Subscription.channel),
@@ -339,35 +413,82 @@ class SubscriptionService:
                 Subscription.status == SubscriptionStatus.ACTIVE,
                 Subscription.expires_at <= now,
             )
-            .with_for_update(skip_locked=True)
+            .order_by(Subscription.user_id, Subscription.id)
+            .with_for_update(of=User, skip_locked=True)
+            .limit(100)
         )
         subscriptions = list(result)
+        expired = 0
         for subscription in subscriptions:
+            user_id = await self.session.scalar(
+                select(User.id)
+                .where(User.id == subscription.user_id)
+                .with_for_update(skip_locked=True)
+            )
+            if user_id is None:
+                continue
+            subscription = await self.session.scalar(
+                select(Subscription)
+                .options(
+                    selectinload(Subscription.user),
+                    selectinload(Subscription.channel),
+                    selectinload(Subscription.invite_link),
+                )
+                .where(Subscription.id == subscription.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if subscription.status != SubscriptionStatus.ACTIVE or subscription.expires_at > now:
+                continue
             await self._revoke_loaded(
                 subscription,
-                bot,
+                None if defer_telegram else bot,
                 "subscription expired",
                 SubscriptionStatus.EXPIRED,
             )
-            await self._notify_expired(subscription, bot)
+            if defer_telegram or bot is None:
+                await AccessOperationService(self.session).enqueue(
+                    f"expired-notice:{subscription.id}:{subscription.expires_at.isoformat()}",
+                    "expiry_notice",
+                    subscription_id=subscription.id,
+                    telegram_id=subscription.user.telegram_id,
+                    chat_id=subscription.channel.telegram_chat_id,
+                    expires_at_snapshot=subscription.expires_at,
+                )
+            else:
+                try:
+                    await self._notify_expired(subscription, bot)
+                except TelegramAPIError as exc:
+                    operation = await AccessOperationService(self.session).enqueue(
+                        f"expired-notice:{subscription.id}:{subscription.expires_at.isoformat()}",
+                        "expiry_notice",
+                        subscription_id=subscription.id,
+                        telegram_id=subscription.user.telegram_id,
+                        chat_id=subscription.channel.telegram_chat_id,
+                        expires_at_snapshot=subscription.expires_at,
+                    )
+                    operation.last_error = type(exc).__name__
+                    operation.next_attempt_at = _utcnow() + timedelta(
+                        seconds=getattr(exc, "retry_after", 60)
+                    )
+            expired += 1
         await self.session.commit()
-        return len(subscriptions)
+        return expired
 
     async def send_expiration_reminders(
         self,
         bot: Bot | None,
         intervals_minutes: list[int],
+        *,
+        time_budget_seconds: float = 30,
     ) -> int:
         if bot is None:
             return 0
 
         now = _utcnow()
+        deadline = asyncio.get_running_loop().time() + time_budget_seconds
         normalized_intervals = sorted(
-            {
-                int(minutes)
-                for minutes in intervals_minutes
-                if 0 < int(minutes) <= 525_600
-            },
+            {int(minutes) for minutes in intervals_minutes if 0 < int(minutes) <= 525_600},
             reverse=True,
         )
         max_minutes = max(normalized_intervals, default=0)
@@ -382,13 +503,15 @@ class SubscriptionService:
                 Subscription.expires_at <= now + timedelta(minutes=max_minutes),
             )
             .with_for_update(skip_locked=True)
+            .limit(100)
         )
         sent = 0
         for subscription in result:
+            budget = deadline - asyncio.get_running_loop().time()
+            if budget <= 0:
+                break
             remaining = subscription.expires_at - now
-            period_duration = (
-                subscription.expires_at - subscription.period_started_at
-            )
+            period_duration = subscription.expires_at - subscription.period_started_at
             candidates = [
                 minutes
                 for minutes in normalized_intervals
@@ -405,15 +528,12 @@ class SubscriptionService:
             ):
                 continue
             try:
-                await bot.send_message(
-                    subscription.user.telegram_id,
-                    (
-                        f"Подписка на «{subscription.channel.title}» закончится "
-                        f"{_reminder_interval_text(threshold_minutes)}. "
-                        "Продлите доступ заранее."
-                    ),
-                )
-            except TelegramAPIError as exc:
+                async with asyncio.timeout(min(10, budget)):
+                    await bot.send_message(
+                        subscription.user.telegram_id,
+                        f"Подписка на «{subscription.channel.title}» закончится {subscription.expires_at:%d.%m.%Y %H:%M} UTC. Продлите доступ заранее.",
+                    )
+            except (TelegramAPIError, TimeoutError) as exc:
                 logger.warning(
                     "Subscription reminder failed subscription_id=%s error=%s",
                     subscription.id,
@@ -455,9 +575,7 @@ class SubscriptionService:
         force_new: bool = False,
     ) -> tuple[InviteLink, str | None]:
         existing = await self.session.scalar(
-            select(InviteLink).where(
-                InviteLink.subscription_id == subscription.id
-            )
+            select(InviteLink).where(InviteLink.subscription_id == subscription.id)
         )
         previous_primary_link = (
             existing.link
@@ -520,25 +638,19 @@ class SubscriptionService:
                 bot,
                 force_new=force_new,
             )
-        except (TelegramAPIError, ChannelAccessError):
-            if (
-                bot is not None
-                and invite.link
-                and invite.link != previous_primary_link
-            ):
-                await self._revoke_invite_safely(
+        except (TelegramAPIError, ChannelAccessError) as exc:
+            if bot is not None and invite.link and invite.link != previous_primary_link:
+                compensated = await self._revoke_invite_safely(
                     bot,
                     channel.telegram_chat_id,
                     invite.link,
                     subscription.id,
                     "primary_compensation",
                 )
+                if not compensated:
+                    exc.cleanup_invites = [(channel.telegram_chat_id, invite.link)]
             raise
-        if (
-            bot is not None
-            and previous_primary_link
-            and previous_primary_link != invite.link
-        ):
+        if bot is not None and previous_primary_link and previous_primary_link != invite.link:
             await self._revoke_invite_safely(
                 bot,
                 channel.telegram_chat_id,
@@ -718,9 +830,7 @@ class SubscriptionService:
             bot_user = await bot.get_me()
             member = await bot.get_chat_member(chat_id, bot_user.id)
         except TelegramAPIError as exc:
-            raise ChannelAccessError(
-                f"Bot cannot inspect channel {chat_id}"
-            ) from exc
+            raise ChannelAccessError(f"Bot cannot inspect channel {chat_id}") from exc
         if member.status == ChatMemberStatus.CREATOR:
             return
         if member.status != ChatMemberStatus.ADMINISTRATOR:
@@ -730,23 +840,29 @@ class SubscriptionService:
         if not getattr(member, "can_restrict_members", False):
             raise ChannelAccessError(f"Bot cannot restrict members in channel {chat_id}")
 
-    @staticmethod
     async def _revoke_invite_safely(
+        self,
         bot: Bot,
         chat_id: int,
         link: str,
         subscription_id: int,
         kind: str,
-    ) -> None:
+    ) -> bool:
         try:
             await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=link)
+            return True
         except TelegramAPIError as exc:
+            from app.services.access_operation_service import AccessOperationService
+
+            exc.cleanup_invites = [(chat_id, link)]
+            await AccessOperationService(self.session).enqueue_cleanup(exc)
             logger.info(
                 "Old invite revoke skipped subscription_id=%s kind=%s error=%s",
                 subscription_id,
                 kind,
                 type(exc).__name__,
             )
+            return False
 
     async def _revoke_loaded(
         self,
@@ -755,118 +871,82 @@ class SubscriptionService:
         reason: str,
         status: SubscriptionStatus,
     ) -> AccessChangeResult:
+        from app.services.access_operation_service import AccessOperationService
+
         now = _utcnow()
-        changed = False
-        error: str | None = None
-        if bot is not None:
-            try:
-                await bot.ban_chat_member(
-                    chat_id=subscription.channel.telegram_chat_id,
-                    user_id=subscription.user.telegram_id,
-                )
-                await bot.unban_chat_member(
-                    chat_id=subscription.channel.telegram_chat_id,
-                    user_id=subscription.user.telegram_id,
-                    only_if_banned=True,
-                )
-                changed = True
-            except TelegramAPIError as exc:
-                error = type(exc).__name__
-                logger.warning(
-                    "Telegram access revoke failed subscription_id=%s channel_id=%s error=%s",
-                    subscription.id,
-                    subscription.channel_id,
-                    error,
-                )
-
-            if subscription.invite_link and not subscription.invite_link.is_revoked:
-                try:
-                    await bot.revoke_chat_invite_link(
-                        chat_id=subscription.channel.telegram_chat_id,
-                        invite_link=subscription.invite_link.link,
-                    )
-                except TelegramAPIError as exc:
-                    logger.warning(
-                        "Invite revoke failed subscription_id=%s error=%s",
-                        subscription.id,
-                        type(exc).__name__,
-                    )
-
-            materials_channel_id = (
-                subscription.invite_link.materials_channel_id
-                if subscription.invite_link and subscription.invite_link.materials_channel_id
-                else await RuntimeSettingsService(self.session).get(
-                    RuntimeSettingsService.MATERIALS_CHANNEL_ID,
-                    get_settings().materials_channel_id,
-                )
-            )
-            if (
-                materials_channel_id is not None
-                and subscription.invite_link
-                and subscription.invite_link.materials_link
-                and not subscription.invite_link.materials_is_revoked
-            ):
-                try:
-                    await bot.revoke_chat_invite_link(
-                        chat_id=materials_channel_id,
-                        invite_link=subscription.invite_link.materials_link,
-                    )
-                except TelegramAPIError as exc:
-                    logger.warning(
-                        "Materials invite revoke failed subscription_id=%s error=%s",
-                        subscription.id,
-                        type(exc).__name__,
-                    )
-            if materials_channel_id is not None:
-                try:
-                    await bot.ban_chat_member(
-                        chat_id=materials_channel_id,
-                        user_id=subscription.user.telegram_id,
-                    )
-                    await bot.unban_chat_member(
-                        chat_id=materials_channel_id,
-                        user_id=subscription.user.telegram_id,
-                        only_if_banned=True,
-                    )
-                except TelegramAPIError as exc:
-                    logger.warning(
-                        "Materials access revoke failed subscription_id=%s channel_id=%s error=%s",
-                        subscription.id,
-                        materials_channel_id,
-                        type(exc).__name__,
-                    )
-
+        service = AccessOperationService(self.session)
         subscription.status = status
         subscription.revoked_at = now
         subscription.revoke_reason = reason[:512]
         if status == SubscriptionStatus.CANCELLED:
             subscription.cancelled_at = now
-        if subscription.invite_link:
-            subscription.invite_link.is_revoked = True
-            subscription.invite_link.revoked_at = now
-            if subscription.invite_link.materials_link:
-                subscription.invite_link.materials_is_revoked = True
-                subscription.invite_link.materials_revoked_at = now
         await self.session.flush()
-        event = "subscription.expired" if status == SubscriptionStatus.EXPIRED else "subscription.revoked"
+        operations = []
+        base = f"revoke:{subscription.id}:{subscription.expires_at.isoformat()}"
+        values = {
+            "subscription_id": subscription.id,
+            "telegram_id": subscription.user.telegram_id,
+            "expires_at_snapshot": subscription.expires_at,
+        }
+        chats = [(subscription.channel.telegram_chat_id, None)]
+        invite = subscription.invite_link
+        materials_channel_id = (
+            invite.materials_channel_id
+            if invite and invite.materials_channel_id
+            else await RuntimeSettingsService(self.session).get(
+                RuntimeSettingsService.MATERIALS_CHANNEL_ID, get_settings().materials_channel_id
+            )
+        )
+        if materials_channel_id is not None:
+            chats.append((materials_channel_id, "materials"))
+        for chat_id, kind in chats:
+            operation = await service.enqueue(
+                f"{base}:member:{chat_id}", "remove_member", chat_id=chat_id, **values
+            )
+            operations.append(operation)
+            link = invite.materials_link if invite and kind else invite.link if invite else None
+            if link:
+                operations.append(
+                    await service.enqueue(
+                        f"{base}:link:{chat_id}",
+                        "revoke_link",
+                        chat_id=chat_id,
+                        invite_link=link,
+                        **values,
+                    )
+                )
+        failures = []
+        for operation in operations:
+            if not await service.execute(operation, bot):
+                failures.append(operation.last_error or "pending")
+        if invite:
+            main_done = all(
+                o.completed_at
+                for o in operations
+                if o.kind == "revoke_link" and o.chat_id == subscription.channel.telegram_chat_id
+            )
+            materials_done = all(
+                o.completed_at
+                for o in operations
+                if o.kind == "revoke_link" and o.chat_id == materials_channel_id
+            )
+            invite.is_revoked = main_done
+            invite.revoked_at = now if main_done else None
+            if invite.materials_link:
+                invite.materials_is_revoked = materials_done
+                invite.materials_revoked_at = now if materials_done else None
+        await self.session.flush()
         await self._notify_admins(
             bot,
             "subscriptions",
-            event,
-            f"Доступ пользователя {subscription.user.telegram_id} отозван: {reason[:120]}.",
+            "subscription.revoked",
+            f"Подписка пользователя {subscription.user.telegram_id} завершена; Telegram: {'повтор запланирован' if failures else 'операции подтверждены'}.",
             f"{subscription.id}:{status.value}",
             subscription.channel_id,
         )
-        if error:
-            await self._notify_admins(
-                bot,
-                "errors",
-                "subscription.telegram_revoke_failed",
-                f"Подписка #{subscription.id} отменена в базе, но Telegram вернул {error}.",
-                f"{subscription.id}:{error}",
-                subscription.channel_id,
-            )
-        return AccessChangeResult(subscription, changed, error)
+        return AccessChangeResult(
+            subscription, not failures and bot is not None, ",".join(failures) if failures else None
+        )
 
     async def _notify_expired(self, subscription: Subscription, bot: Bot | None) -> None:
         if bot is None or await self._notification_exists(
@@ -880,7 +960,7 @@ class SubscriptionService:
                 subscription.user.telegram_id,
                 (
                     f"Подписка на «{subscription.channel.title}» закончилась. "
-                    "Доступ к каналу закрыт."
+                    "Право доступа завершено; обработка удаления выполняется автоматически."
                 ),
             )
         except TelegramAPIError as exc:
@@ -889,7 +969,7 @@ class SubscriptionService:
                 subscription.id,
                 type(exc).__name__,
             )
-            return
+            raise
         self.session.add(
             NotificationLog(
                 user_id=subscription.user_id,
@@ -940,9 +1020,10 @@ def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-def _invite_expiration(now: datetime, subscription_expiration: datetime, ttl_minutes: int) -> datetime:
+def _invite_expiration(
+    now: datetime, subscription_expiration: datetime, ttl_minutes: int
+) -> datetime:
     configured = now + timedelta(minutes=ttl_minutes)
-    # Keep join-request links usable for the subscription lifetime, capped by Telegram's limit.
     return min(max(configured, subscription_expiration), now + timedelta(days=366))
 
 

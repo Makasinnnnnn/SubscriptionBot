@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.admin.pricing import validate_plan_price
 from app.admin.service import AdminPermissionService
 from app.admin.settings_service import RuntimeSettingsService
 from app.bot.keyboards.admin import (
@@ -34,9 +35,9 @@ from app.db.models import (
 from app.db.session import async_session_factory
 from app.payments.providers import ProviderAPIError, ProviderNotConfiguredError
 from app.payments.registry import get_payment_provider
-from app.services.payment_service import PaymentService, set_status_timestamp
-from app.subscriptions.service import SubscriptionService
+from app.services.payment_service import PaymentService
 from app.subscriptions.presentation import access_delivery_text
+from app.subscriptions.service import SubscriptionService
 
 router = Router()
 
@@ -106,7 +107,9 @@ async def admin_add_channel(message: Message) -> None:
             return
 
         if not await _bot_is_channel_admin(message, telegram_chat_id):
-            await message.answer("Бот не является администратором этого канала или канал недоступен.")
+            await message.answer(
+                "Бот не является администратором этого канала или канал недоступен."
+            )
             return
 
         channel = await session.scalar(
@@ -157,18 +160,16 @@ async def admin_add_plan(message: Message) -> None:
             return
         parts = _pipe_payload(message)
         if len(parts) < 4:
-            await message.answer(
-                "Формат: /admin_add_plan channel_id | Название | дни | цена | RUB"
-            )
+            await message.answer("Формат: /admin_add_plan channel_id | Название | дни | цена | RUB")
             return
         try:
             channel_id = int(parts[0])
             duration_days = int(parts[2])
-            price = Decimal(parts[3])
+            price = Decimal(parts[3].replace(",", "."))
         except (ValueError, InvalidOperation):
             await message.answer("channel_id и дни должны быть целыми числами, цена — числом.")
             return
-        if duration_days <= 0 or price <= 0:
+        if duration_days <= 0 or not price.is_finite() or price <= 0:
             await message.answer("Дни и цена должны быть больше нуля.")
             return
         channel = await session.get(Channel, channel_id)
@@ -178,12 +179,18 @@ async def admin_add_plan(message: Message) -> None:
         if not await _authorize_channel(message, session, channel.id):
             return
         currency = parts[4].upper() if len(parts) > 4 and parts[4] else "RUB"
+        try:
+            price = validate_plan_price(price, currency)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
         plan = Plan(
             channel_id=channel.id,
             title=parts[1],
             duration_days=duration_days,
             price=price,
             currency=currency,
+            stars_price=int(price) if currency == "XTR" else None,
             is_active=True,
         )
         session.add(plan)
@@ -208,9 +215,7 @@ async def admin_payments(message: Message) -> None:
     async with async_session_factory() as session:
         if not await _authorize_message(message, session):
             return
-        await message.answer(
-            await _payments_text(session, _limit(message), message.from_user.id)
-        )
+        await message.answer(await _payments_text(session, _limit(message), message.from_user.id))
 
 
 @router.message(Command("admin_refresh_payment"))
@@ -227,7 +232,7 @@ async def admin_refresh_payment(message: Message) -> None:
         if payment is None:
             await message.answer("Платёж не найден.")
             return
-        if not await _authorize_channel(message, session, payment.plan.channel_id):
+        if not await _authorize_channel(message, session, payment.access_channel_id):
             return
         if payment.provider in {"dev", "telegram-stars"}:
             await message.answer("Статус этого провайдера обновляется только событием внутри бота.")
@@ -265,7 +270,7 @@ async def admin_refund(message: Message) -> None:
         if payment is None or payment.status != PaymentStatus.PAID:
             await message.answer("Для полного возврата нужен существующий платёж в статусе paid.")
             return
-        if not await _authorize_channel(message, session, payment.plan.channel_id):
+        if not await _authorize_channel(message, session, payment.access_channel_id):
             return
         await message.answer(
             f"Вернуть полностью {payment.amount} {payment.currency} по платежу #{payment.id}? "
@@ -297,33 +302,24 @@ async def admin_refund_confirm(callback: CallbackQuery) -> None:
         if payment is None or payment.status != PaymentStatus.PAID:
             await callback.answer("Платёж уже изменён или не найден.", show_alert=True)
             return
-        if not await permission.can_manage_channel(callback.from_user.id, payment.plan.channel_id):
+        if not await permission.can_manage_channel(
+            callback.from_user.id, payment.access_channel_id
+        ):
             await callback.answer("Нет прав на этот канал.", show_alert=True)
             return
 
         try:
-            refunded = await _refund_payment(callback, payment)
-        except (ProviderNotConfiguredError, ProviderAPIError, TelegramAPIError):
+            from app.services.refund_service import RefundService
+
+            refunded = await RefundService(session).request(payment, callback.bot)
+        except (ProviderNotConfiguredError, ProviderAPIError, TelegramAPIError, ValueError):
             await callback.answer("Провайдер не подтвердил возврат.", show_alert=True)
             return
         if not refunded:
-            await callback.answer("Этот провайдер не поддерживает автоматический возврат.", show_alert=True)
+            await callback.answer(
+                "Возврат ожидает подтверждения; доступ сохранён.", show_alert=True
+            )
             return
-
-        payment.status = PaymentStatus.REFUNDED
-        set_status_timestamp(payment, PaymentStatus.REFUNDED)
-        subscription = await session.scalar(
-            select(Subscription).where(
-                Subscription.payment_id == payment.id,
-                Subscription.status == SubscriptionStatus.ACTIVE,
-            )
-        )
-        if subscription is not None:
-            await SubscriptionService(session).revoke(
-                subscription.id,
-                callback.bot,
-                reason=f"payment {payment.id} refunded",
-            )
         await permission.audit(
             callback.from_user.id,
             "payment.refund",
@@ -334,7 +330,7 @@ async def admin_refund_confirm(callback: CallbackQuery) -> None:
         await session.commit()
     await callback.answer("Возврат выполнен.")
     await callback.message.edit_text(
-        f"Платёж #{payment_id} возвращён, связанный доступ отозван.",
+        f"Платёж #{payment_id} возвращён, оплаченный им остаток периода пересчитан.",
         reply_markup=admin_back_keyboard(),
     )
 
@@ -371,15 +367,13 @@ async def admin_user(message: Message) -> None:
             .order_by(Subscription.expires_at.desc())
         )
         payments_count_query = (
-            select(func.count(Payment.id))
-            .join(Payment.plan)
-            .where(Payment.user_id == user.id)
+            select(func.count(Payment.id)).join(Payment.plan).where(Payment.user_id == user.id)
         )
         if scope is not None:
-            subscriptions_query = subscriptions_query.where(
-                Subscription.channel_id.in_(scope)
+            subscriptions_query = subscriptions_query.where(Subscription.channel_id.in_(scope))
+            payments_count_query = payments_count_query.where(
+                func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(scope)
             )
-            payments_count_query = payments_count_query.where(Plan.channel_id.in_(scope))
         subscriptions = list(await session.scalars(subscriptions_query))
         payments_count = await session.scalar(payments_count_query) or 0
         lines = [
@@ -586,7 +580,9 @@ async def admin_set_notification_days(message: Message) -> None:
             [day * 1440 for day in days],
             message.from_user.id,
         )
-        await _audit(session, message, "settings.notification_days", "setting", None, {"days": days})
+        await _audit(
+            session, message, "settings.notification_days", "setting", None, {"days": days}
+        )
         await session.commit()
         await message.answer(f"Напоминания настроены за {', '.join(map(str, days))} дн.")
 
@@ -616,8 +612,7 @@ async def admin_set_notification_intervals(message: Message) -> None:
         )
         await session.commit()
         await message.answer(
-            "Напоминания настроены: "
-            + ", ".join(_format_interval(item) for item in intervals)
+            "Напоминания настроены: " + ", ".join(_format_interval(item) for item in intervals)
         )
 
 
@@ -741,9 +736,7 @@ async def admin_admin_access(message: Message) -> None:
             return
         admin = await session.scalar(
             select(Admin)
-            .options(
-                selectinload(Admin.channel_access).selectinload(AdminChannelAccess.channel)
-            )
+            .options(selectinload(Admin.channel_access).selectinload(AdminChannelAccess.channel))
             .where(Admin.telegram_id == telegram_id)
         )
         if admin is None:
@@ -754,8 +747,7 @@ async def admin_admin_access(message: Message) -> None:
             f"Область: {'все каналы' if admin.all_channels else 'только выбранные каналы'}",
         ]
         lines.extend(
-            f"- #{access.channel_id} {access.channel.title}"
-            for access in admin.channel_access
+            f"- #{access.channel_id} {access.channel.title}" for access in admin.channel_access
         )
         await message.answer("\n".join(lines))
 
@@ -882,15 +874,12 @@ async def admin_notifications(message: Message) -> None:
             return
         logs = list(
             await session.scalars(
-                select(NotificationLog)
-                .order_by(NotificationLog.id.desc())
-                .limit(_limit(message))
+                select(NotificationLog).order_by(NotificationLog.id.desc()).limit(_limit(message))
             )
         )
         lines = ["Последние уведомления:"]
         lines.extend(
-            f"#{log.id} user:{log.user_id} sub:{log.subscription_id} {log.type}"
-            for log in logs
+            f"#{log.id} user:{log.user_id} sub:{log.subscription_id} {log.type}" for log in logs
         )
         await message.answer("\n".join(lines) if logs else "Уведомлений пока нет.")
 
@@ -958,7 +947,7 @@ async def admin_debug_payment(message: Message) -> None:
             await message.answer("Платёж не найден.")
             return
         scope = await AdminPermissionService(session).channel_scope(message.from_user.id)
-        if scope is not None and payment.plan.channel_id not in scope:
+        if scope is not None and payment.access_channel_id not in scope:
             await message.answer("Платёж недоступен.")
             return
         await message.answer(
@@ -1015,7 +1004,13 @@ async def _set_channel_active(message: Message, active: bool) -> None:
         if not await _authorize_channel(message, session, channel.id):
             return
         channel.is_active = active
-        await _audit(session, message, "channel.enable" if active else "channel.disable", "channel", channel.id)
+        await _audit(
+            session,
+            message,
+            "channel.enable" if active else "channel.disable",
+            "channel",
+            channel.id,
+        )
         await session.commit()
         await message.answer("Канал включён." if active else "Канал отключён.")
 
@@ -1156,14 +1151,10 @@ async def _channels_text(session: AsyncSession, actor_telegram_id: int) -> str:
 
 async def _plans_text(session: AsyncSession, actor_telegram_id: int) -> str:
     scope = await AdminPermissionService(session).channel_scope(actor_telegram_id)
-    query = select(Plan).options(selectinload(Plan.channel)).order_by(
-        Plan.channel_id, Plan.price
-    )
+    query = select(Plan).options(selectinload(Plan.channel)).order_by(Plan.channel_id, Plan.price)
     if scope is not None:
         query = query.where(Plan.channel_id.in_(scope))
-    plans = list(
-        await session.scalars(query)
-    )
+    plans = list(await session.scalars(query))
     if not plans:
         return "Тарифов пока нет."
     lines = ["Тарифы:"]
@@ -1188,10 +1179,10 @@ async def _payments_text(
         .limit(limit)
     )
     if scope is not None:
-        query = query.join(Payment.plan).where(Plan.channel_id.in_(scope))
-    payments = list(
-        await session.scalars(query)
-    )
+        query = query.join(Payment.plan).where(
+            func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(scope)
+        )
+    payments = list(await session.scalars(query))
     if not payments:
         return "Платежей пока нет."
     lines = ["Последние платежи:"]
@@ -1217,9 +1208,7 @@ async def _subscriptions_text(
     )
     if scope is not None:
         query = query.where(Subscription.channel_id.in_(scope))
-    subscriptions = list(
-        await session.scalars(query)
-    )
+    subscriptions = list(await session.scalars(query))
     if not subscriptions:
         return "Подписок пока нет."
     lines = ["Последние подписки:"]
@@ -1245,9 +1234,7 @@ async def _subscriptions_view(
         )
         if scope is not None:
             query = query.where(Subscription.channel_id.in_(scope))
-        subscriptions = list(
-            await session.scalars(query)
-        )
+        subscriptions = list(await session.scalars(query))
     rows: list[list[InlineKeyboardButton]] = []
     for subscription in subscriptions:
         user = subscription.user
@@ -1283,8 +1270,12 @@ async def _stats_text(session: AsyncSession, actor_telegram_id: int) -> str:
             Subscription.channel_id.in_(scope)
         )
         active_query = active_query.where(Subscription.channel_id.in_(scope))
-        paid_query = paid_query.join(Payment.plan).where(Plan.channel_id.in_(scope))
-        revenue_query = revenue_query.join(Payment.plan).where(Plan.channel_id.in_(scope))
+        paid_query = paid_query.join(Payment.plan).where(
+            func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(scope)
+        )
+        revenue_query = revenue_query.join(Payment.plan).where(
+            func.coalesce(Payment.purchased_channel_id, Plan.channel_id).in_(scope)
+        )
     users = await session.scalar(users_query) or 0
     active = await session.scalar(active_query) or 0
     paid = await session.scalar(paid_query) or 0
@@ -1358,15 +1349,11 @@ def _parse_notification_intervals(value: str) -> list[int]:
         if not item:
             continue
         if item[-1:] not in {"d", "h", "m"}:
-            raise ValueError(
-                "Формат: /admin_set_notification_intervals 7d,3d,1d,12h"
-            )
+            raise ValueError("Формат: /admin_set_notification_intervals 7d,3d,1d,12h")
         try:
             amount = int(item[:-1])
         except ValueError as exc:
-            raise ValueError(
-                "Формат: /admin_set_notification_intervals 7d,3d,1d,12h"
-            ) from exc
+            raise ValueError("Формат: /admin_set_notification_intervals 7d,3d,1d,12h") from exc
         minutes = amount * {"d": 1440, "h": 60, "m": 1}[item[-1]]
         if minutes <= 0 or minutes > 525_600:
             raise ValueError("Интервал должен быть от 1 минуты до 365 дней.")

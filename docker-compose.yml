@@ -10,8 +10,6 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
-      redis:
-        condition: service_healthy
 
   bot:
     build: .
@@ -23,8 +21,6 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
-      redis:
-        condition: service_healthy
 
   scheduler:
     build: .
@@ -36,8 +32,6 @@ services:
     depends_on:
       migrations:
         condition: service_completed_successfully
-      redis:
-        condition: service_healthy
 
   ops:
     build: .
@@ -77,16 +71,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
-      retries: 20
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
       retries: 20
 
 volumes:

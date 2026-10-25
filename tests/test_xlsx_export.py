@@ -11,7 +11,7 @@ def test_xlsx_export_has_filters_dates_and_formula_protection() -> None:
         sheet_name="Платежи/2026",
         headers=["ID", "Username", "Создан"],
         rows=[
-            (1, "=HYPERLINK(\"bad\")", datetime(2026, 7, 27, 12, 30)),
+            (1, '=HYPERLINK("bad")', datetime(2026, 7, 27, 12, 30)),
             (2, "+cmd", datetime(2026, 7, 27, 13, 30)),
             (3, "-formula", datetime(2026, 7, 27, 14, 30)),
             (4, "@value", datetime(2026, 7, 27, 15, 30)),
@@ -26,7 +26,7 @@ def test_xlsx_export_has_filters_dates_and_formula_protection() -> None:
     assert sheet.auto_filter.ref == "A1:C5"
     assert [cell.value for cell in sheet[1]] == ["ID", "Username", "Создан"]
     assert [sheet.cell(row=row, column=2).value for row in range(2, 6)] == [
-        "'=HYPERLINK(\"bad\")",
+        '\'=HYPERLINK("bad")',
         "'+cmd",
         "'-formula",
         "'@value",

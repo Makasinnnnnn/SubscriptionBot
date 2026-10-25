@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,7 +83,7 @@ async def test_restricted_admin_lists_only_scoped_channel_data(session, monkeypa
             channel_id=channel.id,
             title=channel.title,
             duration_days=30,
-            price=Decimal("100"),
+            price=Decimal(100),
             currency="RUB",
         )
         for channel in (channel_a, channel_b)
@@ -96,7 +96,7 @@ async def test_restricted_admin_lists_only_scoped_channel_data(session, monkeypa
             plan_id=plan.id,
             provider="dev",
             provider_payment_id=f"provider-{index}",
-            amount=Decimal("100"),
+            amount=Decimal(100),
             currency="RUB",
             idempotency_key=f"payment-{index}",
         )

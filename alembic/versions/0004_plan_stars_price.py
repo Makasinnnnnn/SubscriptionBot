@@ -5,6 +5,7 @@ Revises: 0003_legal_admin_notifications
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0004_plan_stars_price"

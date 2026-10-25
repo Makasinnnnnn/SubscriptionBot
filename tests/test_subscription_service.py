@@ -1,10 +1,8 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-
-from decimal import Decimal
-
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
 
@@ -263,7 +261,7 @@ async def test_paid_subscription_uses_and_revokes_both_channels(
         channel_id=channel.id,
         title="Month",
         duration_days=30,
-        price=Decimal("4990"),
+        price=Decimal(4990),
         currency="RUB",
     )
     session.add(plan)
@@ -274,7 +272,7 @@ async def test_paid_subscription_uses_and_revokes_both_channels(
         provider="cryptobot",
         provider_payment_id="invoice-1",
         status=PaymentStatus.PAID,
-        amount=Decimal("4990"),
+        amount=Decimal(4990),
         currency="RUB",
         idempotency_key="payment-1",
     )
@@ -334,7 +332,7 @@ async def test_new_payment_refreshes_used_links_for_active_subscription(
         channel_id=channel.id,
         title="Month",
         duration_days=30,
-        price=Decimal("4990"),
+        price=Decimal(4990),
         currency="RUB",
     )
     session.add(plan)
@@ -345,7 +343,7 @@ async def test_new_payment_refreshes_used_links_for_active_subscription(
         provider="cryptobot",
         provider_payment_id="invoice-renew-1",
         status=PaymentStatus.PAID,
-        amount=Decimal("4990"),
+        amount=Decimal(4990),
         currency="RUB",
         idempotency_key="renew-1",
     )
@@ -363,7 +361,7 @@ async def test_new_payment_refreshes_used_links_for_active_subscription(
         provider="cryptobot",
         provider_payment_id="invoice-renew-2",
         status=PaymentStatus.PAID,
-        amount=Decimal("4990"),
+        amount=Decimal(4990),
         currency="RUB",
         idempotency_key="renew-2",
     )

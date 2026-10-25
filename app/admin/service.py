@@ -50,11 +50,7 @@ class AdminPermissionService:
         if self.is_superadmin(telegram_id):
             return True
         admin = await self.get_db_admin(telegram_id)
-        return (
-            admin is not None
-            and admin.role in {"admin", "superadmin"}
-            and admin.all_channels
-        )
+        return admin is not None and admin.role in {"admin", "superadmin"} and admin.all_channels
 
     async def channel_scope(
         self,

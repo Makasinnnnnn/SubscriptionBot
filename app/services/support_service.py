@@ -57,9 +57,7 @@ def normalize_support_contact(
     if normalized_kind == "username":
         username = raw_value.removeprefix("@")
         if not USERNAME_PATTERN.fullmatch(username):
-            raise ValueError(
-                "Username должен содержать 5-32 латинских символа, цифры или '_'."
-            )
+            raise ValueError("Username должен содержать 5-32 латинских символа, цифры или '_'.")
         return SupportContact(
             kind="username",
             value=username,
@@ -196,9 +194,6 @@ class SupportContactService:
         unique: list[ResolvedSupportContact] = []
         positions: dict[str, int] = {}
         for contact in resolved:
-            # A Telegram ID may resolve to the same public username that is also
-            # configured explicitly. Display that profile only once and retain
-            # the ID-backed definition because it can receive relayed tickets.
             key = (
                 contact.url.lower().rstrip("/")
                 if contact.url
@@ -207,10 +202,7 @@ class SupportContactService:
             existing_index = positions.get(key)
             if existing_index is not None:
                 existing = unique[existing_index]
-                if (
-                    existing.source.kind != "telegram_id"
-                    and contact.source.kind == "telegram_id"
-                ):
+                if existing.source.kind != "telegram_id" and contact.source.kind == "telegram_id":
                     unique[existing_index] = contact
                 continue
             positions[key] = len(unique)
@@ -220,11 +212,7 @@ class SupportContactService:
     async def relay_target(self) -> SupportContact | None:
         """Return the configured Telegram account that receives support tickets."""
         return next(
-            (
-                contact
-                for contact in await self.definitions()
-                if contact.kind == "telegram_id"
-            ),
+            (contact for contact in await self.definitions() if contact.kind == "telegram_id"),
             None,
         )
 

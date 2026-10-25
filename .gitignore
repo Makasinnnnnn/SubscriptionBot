@@ -28,12 +28,15 @@ htmlcov/
 backups/
 *.log
 *.pid
+work/
+**/.obsidian/
 
 # Editor and OS files
 .idea/
 .vscode/
 .agents/
 .codex/
+.serena/
 .DS_Store
 Thumbs.db
 desktop.ini

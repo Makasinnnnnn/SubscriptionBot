@@ -11,6 +11,7 @@ from app.db.enums import PaymentStatus, enum_values
 from app.db.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
+    from app.db.models.channel import Channel
     from app.db.models.plan import Plan
     from app.db.models.promo_code import PromoCode
     from app.db.models.promo_redemption import PromoRedemption
@@ -43,11 +44,17 @@ class Payment(TimestampMixin, Base):
         default=PaymentStatus.PENDING,
         index=True,
     )
-    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 18))
     currency: Mapped[str] = mapped_column(String(8))
+    purchased_duration_days: Mapped[int | None] = mapped_column(default=None)
+    purchased_channel_id: Mapped[int | None] = mapped_column(
+        ForeignKey("channels.id", ondelete="RESTRICT"), default=None
+    )
     invoice_url: Mapped[str | None] = mapped_column(Text, default=None)
     idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
-    metadata_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"), default=dict)
+    metadata_json: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=dict
+    )
     provider_payload: Mapped[dict] = mapped_column(
         JSON().with_variant(JSONB, "postgresql"),
         default=dict,
@@ -63,3 +70,12 @@ class Payment(TimestampMixin, Base):
         back_populates="payment",
     )
     subscription: Mapped["Subscription | None"] = relationship(back_populates="payment")
+    purchased_channel: Mapped["Channel | None"] = relationship()
+
+    @property
+    def access_channel_id(self) -> int:
+        return (
+            self.purchased_channel_id
+            if self.purchased_channel_id is not None
+            else self.plan.channel_id
+        )

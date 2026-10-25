@@ -16,6 +16,8 @@ from app.bot.handlers.start import router as start_router
 from app.bot.handlers.subscriptions import router as subscriptions_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.education.handlers import router as education_router
+from app.education.redirect import router as education_channel_router
 from app.services.admin_notification_service import notify_runtime
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,9 @@ def build_dispatcher() -> Dispatcher:
     dispatcher.include_router(admin_reports_router)
     dispatcher.include_router(admin_settings_router)
     dispatcher.include_router(admin_router)
+    dispatcher.include_router(
+        education_router if get_settings().enable_builtin_education else education_channel_router
+    )
     dispatcher.include_router(start_router)
     dispatcher.include_router(promos_router)
     dispatcher.include_router(subscriptions_router)
@@ -68,6 +73,7 @@ async def _configure_bot_profile(bot: Bot) -> None:
         await bot.set_my_commands(
             [
                 BotCommand(command="start", description="Открыть главное меню"),
+                BotCommand(command="education", description="Методичка Upscale"),
                 BotCommand(command="support", description="Связаться с поддержкой"),
                 BotCommand(command="terms", description="Условия использования"),
                 BotCommand(command="privacy", description="Обработка данных"),

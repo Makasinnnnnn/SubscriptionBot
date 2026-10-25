@@ -1,5 +1,5 @@
-from pathlib import Path
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -14,8 +14,8 @@ from app.bot.keyboards.subscription import (
     legal_acceptance_keyboard,
     main_menu_keyboard,
 )
-from app.db.session import async_session_factory
 from app.db.models import AuditLog
+from app.db.session import async_session_factory
 from app.services.support_service import (
     ResolvedSupportContact,
     SupportContact,
@@ -173,20 +173,14 @@ async def support_contacts(callback: CallbackQuery) -> None:
     if callback.message is None:
         return
     contacts = await _support_targets(callback.bot)
-    text = (
-        "Выберите контакт поддержки:"
-        if contacts
-        else "Контакт поддержки пока не настроен."
-    )
+    text = "Выберите контакт поддержки:" if contacts else "Контакт поддержки пока не настроен."
     await callback.message.edit_text(
         text,
         reply_markup=_support_keyboard(contacts, back_callback="support:menu"),
     )
 
 
-@router.callback_query(
-    (F.data == "support:write") | F.data.startswith("support:write:")
-)
+@router.callback_query((F.data == "support:write") | F.data.startswith("support:write:"))
 async def support_write_start(
     callback: CallbackQuery,
     state: FSMContext,
@@ -197,8 +191,7 @@ async def support_write_start(
     contact = await _support_relay_target()
     if contact is None:
         await callback.message.edit_text(
-            "Получатель обращений пока не настроен. "
-            "Используйте прямой контакт поддержки.",
+            "Получатель обращений пока не настроен. Используйте прямой контакт поддержки.",
             reply_markup=_support_back_keyboard(),
         )
         return
@@ -247,8 +240,7 @@ async def support_write_send(message: Message, state: FSMContext) -> None:
             .limit(1)
         )
     allowed = any(
-        contact.kind == "telegram_id" and contact.value == target_value
-        for contact in definitions
+        contact.kind == "telegram_id" and contact.value == target_value for contact in definitions
     )
     if not allowed:
         await state.clear()
@@ -263,15 +255,10 @@ async def support_write_send(message: Message, state: FSMContext) -> None:
             int((SUPPORT_MESSAGE_COOLDOWN - (now - last_sent_at)).total_seconds()),
         )
         await message.answer(
-            f"Предыдущее обращение уже доставлено. Новое можно отправить через "
-            f"{wait_seconds} сек."
+            f"Предыдущее обращение уже доставлено. Новое можно отправить через {wait_seconds} сек."
         )
         return
-    username = (
-        f"@{message.from_user.username}"
-        if message.from_user.username
-        else "не задан"
-    )
+    username = f"@{message.from_user.username}" if message.from_user.username else "не задан"
     try:
         await message.bot.send_message(
             int(target_value),
@@ -352,9 +339,7 @@ def _support_keyboard(
             ]
         )
     rows.append([InlineKeyboardButton(text="Назад", callback_data=back_callback)])
-    return InlineKeyboardMarkup(
-        inline_keyboard=rows
-    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _support_menu_text() -> str:
@@ -440,9 +425,21 @@ async def _edit_document(
 def _documents_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Условия использования", callback_data="legaldoc:terms:0:menu")],
-            [InlineKeyboardButton(text="Обработка данных", callback_data="legaldoc:privacy:0:menu")],
-            [InlineKeyboardButton(text="Правила возврата", callback_data="legaldoc:refunds:0:menu")],
+            [
+                InlineKeyboardButton(
+                    text="Условия использования", callback_data="legaldoc:terms:0:menu"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Обработка данных", callback_data="legaldoc:privacy:0:menu"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Правила возврата", callback_data="legaldoc:refunds:0:menu"
+                )
+            ],
             [InlineKeyboardButton(text="В меню", callback_data="menu:main")],
         ]
     )
@@ -498,7 +495,9 @@ def _document_pages(key: str) -> list[str]:
 
 
 def _plain_markdown(text: str) -> str:
-    return "\n".join(line.lstrip("# ") if line.startswith("#") else line for line in text.splitlines())
+    return "\n".join(
+        line.lstrip("# ") if line.startswith("#") else line for line in text.splitlines()
+    )
 
 
 def _page_text(title: str, pages: list[str], page: int) -> str:

@@ -13,9 +13,7 @@ if TYPE_CHECKING:
 
 class AdminChannelAccess(TimestampMixin, Base):
     __tablename__ = "admin_channel_access"
-    __table_args__ = (
-        UniqueConstraint("admin_id", "channel_id", name="uq_admin_channel_access"),
-    )
+    __table_args__ = (UniqueConstraint("admin_id", "channel_id", name="uq_admin_channel_access"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     admin_id: Mapped[int] = mapped_column(

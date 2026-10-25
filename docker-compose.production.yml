@@ -1,5 +1,6 @@
 services:
   app:
+    init: true
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log
     env_file: !override ${APP_ENV_FILE:-.env.production}
     environment:
@@ -32,6 +33,7 @@ services:
         max-file: "5"
 
   bot:
+    init: true
     env_file: !override ${APP_ENV_FILE:-.env.production}
     environment:
       APP_MODE: bot
@@ -52,6 +54,7 @@ services:
     logging: *logging
 
   scheduler:
+    init: true
     env_file: !override ${APP_ENV_FILE:-.env.production}
     environment:
       APP_MODE: scheduler
@@ -72,6 +75,7 @@ services:
     logging: *logging
 
   ops:
+    init: true
     env_file: !override ${APP_ENV_FILE:-.env.production}
     environment:
       APP_MODE: ops
@@ -120,13 +124,6 @@ services:
           memory: 1G
     logging: *logging
 
-  redis:
-    restart: unless-stopped
-    ports: !reset []
-    command: redis-server --save 60 1 --loglevel warning
-    deploy:
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: 256M
-    logging: *logging
+volumes:
+  postgres_data:
+    name: ${POSTGRES_VOLUME_NAME:-propgate_postgres_data}

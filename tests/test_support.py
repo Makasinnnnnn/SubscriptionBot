@@ -11,9 +11,9 @@ from app.bot.handlers.legal import (
 )
 from app.core.config import Settings
 from app.services.support_service import (
+    ResolvedSupportContact,
     SupportContact,
     SupportContactService,
-    ResolvedSupportContact,
     normalize_support_contact,
     support_contacts_from_settings,
 )
@@ -33,10 +33,7 @@ def test_support_menu_and_child_screens_have_back_navigation() -> None:
         "support:contacts",
         "menu:main",
     } <= menu_callbacks
-    assert (
-        _support_back_keyboard().inline_keyboard[0][0].callback_data
-        == "support:menu"
-    )
+    assert _support_back_keyboard().inline_keyboard[0][0].callback_data == "support:menu"
 
 
 def test_support_keyboard_has_unique_links_and_one_relay_action() -> None:
@@ -158,9 +155,7 @@ async def test_support_id_and_matching_username_are_resolved_once(
         lambda: settings,
     )
     bot = SimpleNamespace(
-        get_chat=AsyncMock(
-            return_value=SimpleNamespace(username="public_support")
-        )
+        get_chat=AsyncMock(return_value=SimpleNamespace(username="public_support"))
     )
 
     contacts = await SupportContactService(session).resolved(bot)
@@ -185,9 +180,7 @@ async def test_matching_contact_keeps_relay_capability_regardless_of_order(
         lambda: settings,
     )
     bot = SimpleNamespace(
-        get_chat=AsyncMock(
-            return_value=SimpleNamespace(username="public_support")
-        )
+        get_chat=AsyncMock(return_value=SimpleNamespace(username="public_support"))
     )
 
     contacts = await SupportContactService(session).resolved(bot)
@@ -228,15 +221,11 @@ async def test_support_id_without_username_uses_bot_relay(
         "app.services.support_service.get_settings",
         lambda: settings,
     )
-    bot = SimpleNamespace(
-        get_chat=AsyncMock(return_value=SimpleNamespace(username=None))
-    )
+    bot = SimpleNamespace(get_chat=AsyncMock(return_value=SimpleNamespace(username=None)))
 
     contacts = await SupportContactService(session).resolved(bot)
 
-    assert [(item.label, item.url) for item in contacts] == [
-        ("Поддержка", None)
-    ]
+    assert [(item.label, item.url) for item in contacts] == [("Поддержка", None)]
     assert "@101" not in str(contacts)
 
 
@@ -271,9 +260,7 @@ async def test_runtime_support_contacts_override_and_reset_environment(
 
     assert await service.reset_to_environment()
     fallback = await service.definitions()
-    assert [(item.kind, item.value) for item in fallback] == [
-        ("username", "fallback_support")
-    ]
+    assert [(item.kind, item.value) for item in fallback] == [("username", "fallback_support")]
 
 
 @pytest.mark.asyncio
@@ -302,6 +289,4 @@ async def test_empty_runtime_support_falls_back_to_environment(
     )
     contacts = await service.definitions()
 
-    assert [(item.kind, item.value) for item in contacts] == [
-        ("username", "fallback_support")
-    ]
+    assert [(item.kind, item.value) for item in contacts] == [("username", "fallback_support")]

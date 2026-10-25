@@ -1,0 +1,37 @@
+# Standalone journal only. Existing subscription services are unaffected.
+services:
+  journal-migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile.journal
+    env_file: .env.journal
+    environment:
+      JOURNAL_DATABASE_URL: sqlite+aiosqlite:////data/journal.db
+    volumes:
+      - journal_data:/data
+    command: python -m app.journal.migrate
+
+  journal:
+    build:
+      context: .
+      dockerfile: Dockerfile.journal
+    env_file: .env.journal
+    environment:
+      JOURNAL_DATABASE_URL: sqlite+aiosqlite:////data/journal.db
+      JOURNAL_GOOGLE_CREDENTIALS: /run/secrets/journal_google
+    secrets:
+      - journal_google
+    volumes:
+      - journal_data:/data
+    depends_on:
+      journal-migrations:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+secrets:
+  journal_google:
+    # Absolute path outside repository; required only for Docker.
+    file: ${JOURNAL_GOOGLE_SECRET_FILE:?Set JOURNAL_GOOGLE_SECRET_FILE to your credential file}
+
+volumes:
+  journal_data:

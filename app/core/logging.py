@@ -37,10 +37,7 @@ class RedactingFormatter(logging.Formatter):
 
 def setup_logging() -> None:
     settings = get_settings()
-    log_format = (
-        "%(asctime)s %(levelname)s [%(name)s] "
-        "request_id=%(request_id)s %(message)s"
-    )
+    log_format = "%(asctime)s %(levelname)s [%(name)s] request_id=%(request_id)s %(message)s"
     logging.basicConfig(
         level=settings.log_level.upper(),
         format=log_format,

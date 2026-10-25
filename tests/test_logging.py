@@ -11,10 +11,7 @@ def test_log_formatter_redacts_tokens_secrets_and_webhook_paths() -> None:
         level=logging.ERROR,
         pathname=__file__,
         lineno=1,
-        msg=(
-            f"secret={secret} token={token} "
-            "path=/webhooks/cryptobot/private-path-value"
-        ),
+        msg=(f"secret={secret} token={token} path=/webhooks/cryptobot/private-path-value"),
         args=(),
         exc_info=None,
     )

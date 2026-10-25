@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 
 def access_delivery_text(
@@ -7,8 +7,11 @@ def access_delivery_text(
     primary_link: str,
     materials_link: str | None,
 ) -> str:
+    expires_at = (
+        expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at.astimezone(UTC)
+    )
     lines = [
-        f"Доступ активирован до {expires_at:%d.%m.%Y %H:%M}",
+        f"Доступ активирован до {expires_at:%d.%m.%Y %H:%M} UTC",
         "",
         "Основной канал:",
         primary_link,
@@ -18,8 +21,7 @@ def access_delivery_text(
     lines.extend(
         [
             "",
-            "После нажатия Telegram отправит заявку. "
-            "PropGate подтвердит её автоматически.",
+            "После нажатия Telegram отправит заявку. PropGate подтвердит её автоматически.",
         ]
     )
     return "\n".join(lines)

@@ -1,5 +1,7 @@
 # PropGate deployment
 
+Запуск на Windows одной командой и проверка Docker: [DOCKER-START.md](DOCKER-START.md).
+
 Пошаговое подключение `propgate.ru`, HTTPS и постоянного Crypto Pay webhook описано в
 [`DOMAIN_SETUP.md`](DOMAIN_SETUP.md).
 Ежедневные backup, monitoring и безопасная настройка SSH описаны в
@@ -21,7 +23,7 @@ endpoint because its address changes after restart.
 Create `.env.production` from `config/production.example.txt`, replace every placeholder and run:
 
 ```powershell
-docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml config
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml config --quiet
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build
 ```
 
@@ -38,8 +40,8 @@ chmod 600 .env.production
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build
 ```
 
-Forward `https://propgate.ru` to `127.0.0.1:8000` with a reverse proxy. PostgreSQL and Redis
-are not published on the host in the production override. Register provider webhook routes
+Forward `https://propgate.ru` to `127.0.0.1:8000` with a reverse proxy. PostgreSQL
+is not published on the host in the production override. Register provider webhook routes
 under the permanent `https://propgate.ru` origin.
 
 ## Health and logs
@@ -58,7 +60,7 @@ cd /opt/propgate
 ./scripts/backup_db.sh
 git pull --ff-only
 export APP_ENV_FILE=.env.production
-docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build postgres redis migrations
+docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build postgres migrations
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build app bot scheduler ops
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml ps
 curl -fsS http://127.0.0.1:8000/health
@@ -88,7 +90,7 @@ docker compose --env-file .env.production -f docker-compose.yml -f docker-compos
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-Open `/admin` and check tariff tabs, promo creation, support contacts,
+Open `/admin/web` and check tariff tabs, promo creation, support contacts,
 reminder intervals and XLSX export. Then create a disposable discount promo,
 verify the provider invoice amount and complete a test payment before checking
 join requests for both channels.

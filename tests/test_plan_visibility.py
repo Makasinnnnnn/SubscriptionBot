@@ -25,14 +25,14 @@ async def test_materials_channel_is_not_sold_as_a_separate_plan(
         channel_id=primary.id,
         title="Основной тариф",
         duration_days=30,
-        price=Decimal("4990"),
+        price=Decimal(4990),
         currency="RUB",
     )
     materials_plan = Plan(
         channel_id=materials.id,
         title="Старый тариф методичек",
         duration_days=30,
-        price=Decimal("4990"),
+        price=Decimal(4990),
         currency="RUB",
     )
     session.add_all([primary_plan, materials_plan])
@@ -63,7 +63,7 @@ async def test_payment_service_rejects_materials_plan_even_without_handler(
         channel_id=materials.id,
         title="Служебный тариф",
         duration_days=30,
-        price=Decimal("4990"),
+        price=Decimal(4990),
         currency="RUB",
     )
     session.add(materials_plan)

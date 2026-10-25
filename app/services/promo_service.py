@@ -16,6 +16,7 @@ from app.db.models import (
     Subscription,
     User,
 )
+from app.payments.money import normalized_amount, quantum
 
 PROMO_PATTERN = re.compile(r"[A-Z0-9_-]{4,32}")
 PROMO_RESERVATION_TTL = timedelta(hours=1)
@@ -51,16 +52,10 @@ def discounted_amount(
 ) -> Decimal:
     if not 1 <= discount_percent <= 99:
         raise PromoRedemptionError("Скидка должна быть от 1% до 99%.")
+    base_amount = normalized_amount(base_amount, currency)
+    step = quantum(currency)
     factor = Decimal(100 - discount_percent) / Decimal(100)
-    if currency.upper() == "XTR":
-        return max(
-            Decimal(1),
-            (base_amount * factor).quantize(Decimal("1"), rounding=ROUND_HALF_UP),
-        )
-    return max(
-        Decimal("0.01"),
-        (base_amount * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
-    )
+    return max(step, (base_amount * factor).quantize(step, rounding=ROUND_HALF_UP))
 
 
 class PromoService:
@@ -82,9 +77,7 @@ class PromoService:
             .where(PromoCode.code == code)
         )
         self._validate_static(promo, checked_at)
-        user_id = await self.session.scalar(
-            select(User.id).where(User.telegram_id == telegram_id)
-        )
+        user_id = await self.session.scalar(select(User.id).where(User.telegram_id == telegram_id))
         await self.ensure_capacity(
             promo,
             user_id,
@@ -141,7 +134,10 @@ class PromoService:
         *,
         allow_existing_reservation: bool = False,
     ) -> None:
-        cutoff = now - PROMO_RESERVATION_TTL
+        reserved = (
+            Payment.status.in_([PaymentStatus.PENDING, PaymentStatus.PAID]),
+            ~select(PromoRedemption.id).where(PromoRedemption.payment_id == Payment.id).exists(),
+        )
         redeemed_count = 0
         pending_for_user = 0
         if user_id is not None:
@@ -159,8 +155,7 @@ class PromoService:
                     select(func.count(Payment.id)).where(
                         Payment.promo_code_id == promo.id,
                         Payment.user_id == user_id,
-                        Payment.status == PaymentStatus.PENDING,
-                        Payment.created_at >= cutoff,
+                        *reserved,
                     )
                 )
                 or 0
@@ -173,8 +168,7 @@ class PromoService:
             await self.session.scalar(
                 select(func.count(Payment.id)).where(
                     Payment.promo_code_id == promo.id,
-                    Payment.status == PaymentStatus.PENDING,
-                    Payment.created_at >= cutoff,
+                    *reserved,
                 )
             )
             or 0
@@ -183,10 +177,7 @@ class PromoService:
             raise PromoRedemptionError("Лимит применений промокода исчерпан.")
         if user_id is None:
             return
-        if (
-            redeemed_count + pending_for_user
-            >= promo.per_user_limit
-        ):
+        if redeemed_count + pending_for_user >= promo.per_user_limit:
             raise PromoRedemptionError(
                 "Вы уже использовали этот промокод или создали по нему счёт."
             )
@@ -201,16 +192,12 @@ class PromoService:
         if payment.promo_code_id is None:
             return None
         existing = await self.session.scalar(
-            select(PromoRedemption).where(
-                PromoRedemption.payment_id == payment.id
-            )
+            select(PromoRedemption).where(PromoRedemption.payment_id == payment.id)
         )
         if existing is not None:
             return existing
         promo = await self.session.scalar(
-            select(PromoCode)
-            .where(PromoCode.id == payment.promo_code_id)
-            .with_for_update()
+            select(PromoCode).where(PromoCode.id == payment.promo_code_id).with_for_update()
         )
         if promo is None or promo.plan_id != payment.plan_id:
             raise PromoRedemptionError("Промокод платежа больше не существует.")

@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY requirements-journal.txt ./
+RUN pip install --no-cache-dir -r requirements-journal.txt \
+    && groupadd --system app && useradd --system --gid app app \
+    && mkdir /data && chown app:app /data
+COPY app/journal ./app/journal
+RUN touch app/__init__.py
+USER app
+CMD ["python", "-m", "app.journal"]

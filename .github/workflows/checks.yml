@@ -1,0 +1,47 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: subscription_test
+          POSTGRES_USER: subscription_test
+          POSTGRES_PASSWORD: ci-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U subscription_test -d subscription_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      APP_ENV: test
+      DATABASE_URL: sqlite+aiosqlite:///./test.db
+      BOT_TOKEN: ""
+      OPS_BOT_TOKEN: ""
+      ADMIN_IDS: "[]"
+      ADMIN_PASSWORD: ci-test-only-password
+      WEBHOOK_SECRET: ci-test-only-secret
+      TEST_POSTGRES_URL: postgresql+asyncpg://subscription_test:ci-test-password@localhost:5432/subscription_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra dev
+      - run: uv run --frozen --extra dev ruff check app tests main.py alembic
+      - run: uv run --frozen --extra dev pytest -q
+      - run: uv pip check
+      - run: uv run --frozen --extra dev alembic upgrade head
+      - run: uv run --frozen --extra dev alembic check

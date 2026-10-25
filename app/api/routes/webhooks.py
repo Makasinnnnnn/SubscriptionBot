@@ -2,6 +2,7 @@ import ipaddress
 import json
 import logging
 import secrets
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,7 +27,9 @@ async def _process(
     settings = get_settings()
     if not settings.webhook_secret:
         raise HTTPException(status_code=503, detail="Webhook secret is not configured")
-    if secret is None or not secrets.compare_digest(secret, settings.webhook_secret):
+    if secret is None or not secrets.compare_digest(
+        secret.encode(), settings.webhook_secret.encode()
+    ):
         logger.warning("Webhook path secret rejected provider=%s", provider)
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
     client_host = request.client.host if request.client else "unknown"
@@ -59,12 +62,15 @@ async def _process(
             raise HTTPException(status_code=400, detail="Invalid Content-Length")
         if declared_length > settings.webhook_max_body_bytes:
             raise HTTPException(status_code=413, detail="Webhook body is too large")
-    raw_body = await request.body()
-    if len(raw_body) > settings.webhook_max_body_bytes:
-        raise HTTPException(status_code=413, detail="Webhook body is too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > settings.webhook_max_body_bytes:
+            raise HTTPException(status_code=413, detail="Webhook body is too large")
+        body.extend(chunk)
+    raw_body = bytes(body)
     try:
-        payload = json.loads(raw_body)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Webhook JSON must be an object")
@@ -89,7 +95,7 @@ async def yookassa_webhook_without_secret() -> None:
 async def yookassa_webhook(
     secret: str,
     request: Request,
-    session: AsyncSession = Depends(get_session),
+    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, str]:
     return await _process("yookassa", request, session, secret)
 
@@ -103,7 +109,7 @@ async def cryptobot_webhook_without_secret() -> None:
 async def cryptobot_webhook(
     secret: str,
     request: Request,
-    session: AsyncSession = Depends(get_session),
+    session: Annotated[AsyncSession, Depends(get_session)],
 ) -> dict[str, str]:
     return await _process("cryptobot", request, session, secret)
 

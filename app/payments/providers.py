@@ -9,6 +9,7 @@ import httpx
 
 from app.db.enums import PaymentStatus
 from app.payments.base import InvoiceRequest, InvoiceResult, PaymentProvider, PaymentStatusResult
+from app.payments.money import format_amount
 
 
 class ProviderNotConfiguredError(RuntimeError):
@@ -46,7 +47,9 @@ class DevPaymentProvider(PaymentProvider):
         )
 
     async def check_payment_status(self, provider_payment_id: str) -> PaymentStatusResult:
-        return PaymentStatusResult(provider_payment_id, PaymentStatus.PENDING, Decimal("0"), "RUB", {})
+        return PaymentStatusResult(
+            provider_payment_id, PaymentStatus.PENDING, Decimal(0), "RUB", {}
+        )
 
     def get_provider_name(self) -> str:
         return "dev"
@@ -63,7 +66,7 @@ class YooKassaProvider(PaymentProvider):
         self._ensure_configured()
         body = {
             "amount": {
-                "value": _format_amount(request.amount),
+                "value": _format_amount(request.amount, request.currency),
                 "currency": request.currency.upper(),
             },
             "capture": True,
@@ -108,7 +111,6 @@ class YooKassaProvider(PaymentProvider):
         if not provider_payment_id:
             raise WebhookVerificationError("YooKassa webhook does not contain payment id")
 
-        # YooKassa webhooks are verified by fetching the current object state with Basic Auth.
         return await self.check_payment_status(provider_payment_id)
 
     async def check_payment_status(self, provider_payment_id: str) -> PaymentStatusResult:
@@ -124,22 +126,47 @@ class YooKassaProvider(PaymentProvider):
         )
 
     async def refund(self, provider_payment_id: str, amount: Decimal | None = None) -> bool:
+        response = await self.create_refund(provider_payment_id, amount)
+        return str(response.get("status")) == "succeeded"
+
+    async def create_refund(
+        self,
+        provider_payment_id: str,
+        amount: Decimal | None = None,
+        idempotency_key: str | None = None,
+        *,
+        expected_currency: str | None = None,
+    ) -> dict[str, Any]:
         self._ensure_configured()
         payment_status = await self.check_payment_status(provider_payment_id)
         refund_amount = amount or payment_status.amount
+        if expected_currency is not None and (
+            payment_status.provider_payment_id != provider_payment_id
+            or payment_status.status != PaymentStatus.PAID
+            or payment_status.amount != refund_amount
+            or payment_status.currency.upper() != expected_currency.upper()
+        ):
+            raise ProviderAPIError("Refund payment terms do not match the confirmed purchase")
         response = await self._request(
             "POST",
             "/refunds",
             json={
                 "payment_id": provider_payment_id,
                 "amount": {
-                    "value": _format_amount(refund_amount),
+                    "value": _format_amount(refund_amount, payment_status.currency),
                     "currency": payment_status.currency,
                 },
             },
-            headers={"Idempotence-Key": hashlib.sha256(provider_payment_id.encode()).hexdigest()[:64]},
+            headers={
+                "Idempotence-Key": idempotency_key
+                or hashlib.sha256(provider_payment_id.encode()).hexdigest()[:64]
+            },
         )
-        return str(response.get("status")) == "succeeded"
+        return response
+
+    async def check_refund(self, refund_id: str) -> dict[str, Any]:
+        self._ensure_configured()
+        return await self._request("GET", f"/refunds/{refund_id}")
 
     def get_provider_name(self) -> str:
         return "yookassa"
@@ -182,11 +209,40 @@ class CryptoBotProvider(PaymentProvider):
         self.api_url = api_url.rstrip("/")
         self.webhook_ttl_seconds = webhook_ttl_seconds
 
+    async def reconcile_invoice(self, payment_id: int) -> InvoiceResult | None:
+        self._ensure_configured()
+        matched: dict[str, Any] | None = None
+        for offset in range(0, 10000, 1000):
+            response = await self._request(
+                "getInvoices", {"count": 1000, "offset": offset}, retries=2
+            )
+            invoices = response.get("items", []) if isinstance(response, dict) else response
+            matches = [item for item in invoices if str(item.get("payload")) == str(payment_id)]
+            if len(matches) > 1 or (matches and matched is not None):
+                raise ProviderAPIError("Multiple provider invoices match the local attempt")
+            if matches:
+                matched = matches[0]
+            if len(invoices) < 1000:
+                if matched is None:
+                    return None
+                item = matched
+                url = (
+                    item.get("bot_invoice_url")
+                    or item.get("web_app_invoice_url")
+                    or item.get("mini_app_invoice_url")
+                )
+                if not url:
+                    raise ProviderAPIError("Recovered invoice has no payment URL")
+                return InvoiceResult(
+                    str(item["invoice_id"]), str(url), _sanitize_cryptobot_invoice(item)
+                )
+        raise ProviderAPIError("Provider reconciliation scan limit reached")
+
     async def create_invoice(self, request: InvoiceRequest) -> InvoiceResult:
         self._ensure_configured()
         currency = request.currency.upper()
         body: dict[str, Any] = {
-            "amount": _format_amount(request.amount),
+            "amount": _format_amount(request.amount, request.currency),
             "description": request.description[:1024],
             "payload": str(request.payment_id),
             "allow_comments": False,
@@ -322,7 +378,7 @@ class CryptoBotProvider(PaymentProvider):
 
         secret = hashlib.sha256(self.token.encode("utf-8")).digest()
         expected = hmac.new(secret, raw_body, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, signature):
+        if not hmac.compare_digest(expected.encode(), signature.encode()):
             raise WebhookVerificationError("Invalid CryptoBot webhook signature")
 
     def _verify_request_date(self, payload: dict[str, Any]) -> None:
@@ -330,7 +386,7 @@ class CryptoBotProvider(PaymentProvider):
         if not raw_date:
             raise WebhookVerificationError("Missing CryptoBot request_date")
         try:
-            request_date = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+            request_date = datetime.fromisoformat(str(raw_date))
             if request_date.tzinfo is None:
                 request_date = request_date.replace(tzinfo=UTC)
         except ValueError as exc:
@@ -364,14 +420,16 @@ class TelegramStarsProvider(PaymentProvider):
         raise WebhookVerificationError("Telegram Stars uses native Bot API payment updates")
 
     async def check_payment_status(self, provider_payment_id: str) -> PaymentStatusResult:
-        return PaymentStatusResult(provider_payment_id, PaymentStatus.PENDING, Decimal("0"), "XTR", {})
+        return PaymentStatusResult(
+            provider_payment_id, PaymentStatus.PENDING, Decimal(0), "XTR", {}
+        )
 
     def get_provider_name(self) -> str:
         return "telegram-stars"
 
 
-def _format_amount(amount: Decimal) -> str:
-    return str(amount.quantize(Decimal("0.01")))
+def _format_amount(amount: Decimal, currency: str = "RUB") -> str:
+    return format_amount(amount, currency)
 
 
 def _sanitize_cryptobot_invoice(invoice: dict[str, Any]) -> dict[str, Any]:

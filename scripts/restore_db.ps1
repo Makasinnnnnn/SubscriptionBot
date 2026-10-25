@@ -19,15 +19,29 @@ if (-not $SkipSafetyBackup) {
 }
 
 $compose = Join-Path $PSScriptRoot "docker_compose.cmd"
-& $compose exec -T postgres pg_isready -U subscription -d subscription | Out-Null
+$root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$composeArgs = @("--project-directory", $root, "-f", (Join-Path $root "docker-compose.yml"))
+if (Test-Path -LiteralPath (Join-Path $root ".env.production")) {
+    $composeArgs += @("--env-file", (Join-Path $root ".env.production"), "-f", (Join-Path $root "docker-compose.production.yml"))
+}
+& $compose @composeArgs exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "PostgreSQL container is not ready." }
-$container = (& $compose ps -q postgres).Trim()
+$container = (& $compose @composeArgs ps -q postgres).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $container) { throw "PostgreSQL container was not found." }
 $docker = Join-Path $env:LOCALAPPDATA "Programs\DockerDesktop\resources\bin\docker.exe"
 $containerPath = "/tmp/restore.dump"
 & $docker cp $resolved "${container}:$containerPath"
-& $compose exec -T postgres pg_restore -l $containerPath | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Copying backup failed." }
+& $compose @composeArgs exec -T postgres pg_restore -l $containerPath | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Backup integrity check failed." }
-& $compose exec -T postgres pg_restore -U subscription -d subscription --clean --if-exists --no-owner $containerPath
-if ($LASTEXITCODE -ne 0) { throw "pg_restore failed." }
-& $compose exec -T postgres rm -f $containerPath
+& $compose @composeArgs stop app bot ops scheduler
+if ($LASTEXITCODE -ne 0) { throw "Stopping database writers failed." }
+try {
+    & $compose @composeArgs exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --single-transaction --exit-on-error /tmp/restore.dump'
+    if ($LASTEXITCODE -ne 0) { throw "pg_restore failed; services remain stopped." }
+} finally {
+    & $compose @composeArgs exec -T postgres rm -f $containerPath
+}
+& $compose @composeArgs start app bot ops scheduler
+if ($LASTEXITCODE -ne 0) { throw "Database restored, but restarting services failed." }
 Write-Host "Database restored from: $resolved"

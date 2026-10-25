@@ -34,9 +34,7 @@ class RuntimeSettingsService:
         return setting
 
     async def delete(self, key: str) -> bool:
-        setting = await self.session.scalar(
-            select(AppSetting).where(AppSetting.key == key)
-        )
+        setting = await self.session.scalar(select(AppSetting).where(AppSetting.key == key))
         if setting is None:
             return False
         await self.session.delete(setting)
@@ -61,11 +59,7 @@ class RuntimeSettingsService:
                 if legacy
                 else default or [int(day) * 1440 for day in legacy_days]
             )
-        normalized = {
-            int(minutes)
-            for minutes in value
-            if 0 < int(minutes) <= 525_600
-        }
+        normalized = {int(minutes) for minutes in value if 0 < int(minutes) <= 525_600}
         return sorted(normalized, reverse=True)
 
     async def invite_ttl_minutes(self, default: int = 60) -> int:

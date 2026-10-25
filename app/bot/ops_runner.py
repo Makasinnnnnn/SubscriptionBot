@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -108,22 +108,30 @@ async def ops_search(message: Message, state: FSMContext) -> None:
             username = value.removeprefix("@").lower()
             query = query.where(func.lower(User.username) == username)
         user = await session.scalar(query)
-        subscriptions = [] if user is None else list(
-            await session.scalars(
-                select(Subscription)
-                .options(selectinload(Subscription.channel), selectinload(Subscription.user))
-                .where(Subscription.user_id == user.id)
-                .order_by(Subscription.created_at.desc())
-                .limit(20)
+        subscriptions = (
+            []
+            if user is None
+            else list(
+                await session.scalars(
+                    select(Subscription)
+                    .options(selectinload(Subscription.channel), selectinload(Subscription.user))
+                    .where(Subscription.user_id == user.id)
+                    .order_by(Subscription.created_at.desc())
+                    .limit(20)
+                )
             )
         )
-        payments = [] if user is None else list(
-            await session.scalars(
-                select(Payment)
-                .options(selectinload(Payment.user))
-                .where(Payment.user_id == user.id)
-                .order_by(Payment.created_at.desc())
-                .limit(5)
+        payments = (
+            []
+            if user is None
+            else list(
+                await session.scalars(
+                    select(Payment)
+                    .options(selectinload(Payment.user))
+                    .where(Payment.user_id == user.id)
+                    .order_by(Payment.created_at.desc())
+                    .limit(5)
+                )
             )
         )
     await state.clear()
@@ -174,8 +182,10 @@ async def _api_text() -> str:
 async def _telegram_text(bot: Bot) -> str:
     try:
         me = await bot.get_me()
-        return f"Работа Telegram\n\nOps bot: @{me.username or 'без username'}\nAPI Telegram: доступен"
-    except Exception as exc:
+        return (
+            f"Работа Telegram\n\nOps bot: @{me.username or 'без username'}\nAPI Telegram: доступен"
+        )
+    except TelegramAPIError as exc:
         return f"Работа Telegram\n\nAPI Telegram: ошибка {type(exc).__name__}"
 
 
@@ -187,7 +197,11 @@ async def _services_text(bot: Bot) -> str:
 
 async def _webhook_text() -> str:
     async with async_session_factory() as session:
-        events = list(await session.scalars(select(WebhookEvent).order_by(WebhookEvent.created_at.desc()).limit(20)))
+        events = list(
+            await session.scalars(
+                select(WebhookEvent).order_by(WebhookEvent.created_at.desc()).limit(20)
+            )
+        )
     lines = ["Webhook: последние события", ""]
     lines.extend(
         f"{_dt(item.created_at)} | {item.provider} | {item.event_type} | {item.error or 'ok'}"
@@ -201,13 +215,17 @@ async def _access_text() -> str:
         logs = list(
             await session.scalars(
                 select(AuditLog)
-                .where(or_(AuditLog.action.like("subscription.%"), AuditLog.action.like("invite.%")))
+                .where(
+                    or_(AuditLog.action.like("subscription.%"), AuditLog.action.like("invite.%"))
+                )
                 .order_by(AuditLog.created_at.desc())
                 .limit(25)
             )
         )
     lines = ["Доступы: последние действия", ""]
-    lines.extend(f"{_dt(item.created_at)} | {item.action} | #{item.target_id or '-'}" for item in logs)
+    lines.extend(
+        f"{_dt(item.created_at)} | {item.action} | #{item.target_id or '-'}" for item in logs
+    )
     return "\n".join(lines if logs else [*lines, "Действий нет."])
 
 
@@ -232,12 +250,18 @@ async def _db_text() -> str:
             "subscriptions": await session.scalar(select(func.count(Subscription.id))) or 0,
             "webhooks": await session.scalar(select(func.count(WebhookEvent.id))) or 0,
         }
-    return "База данных\n\nСоединение: доступно\n" + "\n".join(f"{key}: {value}" for key, value in counts.items())
+    return "База данных\n\nСоединение: доступно\n" + "\n".join(
+        f"{key}: {value}" for key, value in counts.items()
+    )
 
 
 async def _links_text() -> str:
     async with async_session_factory() as session:
-        links = list(await session.scalars(select(InviteLink).order_by(InviteLink.updated_at.desc()).limit(25)))
+        links = list(
+            await session.scalars(
+                select(InviteLink).order_by(InviteLink.updated_at.desc()).limit(25)
+            )
+        )
     lines = ["Invite-ссылки", ""]
     lines.extend(
         f"{_dt(item.updated_at)} | sub #{item.subscription_id} | "
@@ -258,10 +282,17 @@ async def _subscriptions_text() -> str:
                 .limit(25)
             )
         )
-        active = await session.scalar(
-            select(func.count(Subscription.id)).where(Subscription.status == SubscriptionStatus.ACTIVE)
-        ) or 0
-    return f"Подписки\n\nАктивных: {active}\n\n" + "\n".join(_subscription_lines(subscriptions) or ["Подписок нет."])
+        active = (
+            await session.scalar(
+                select(func.count(Subscription.id)).where(
+                    Subscription.status == SubscriptionStatus.ACTIVE
+                )
+            )
+            or 0
+        )
+    return f"Подписки\n\nАктивных: {active}\n\n" + "\n".join(
+        _subscription_lines(subscriptions) or ["Подписок нет."]
+    )
 
 
 async def _users_text() -> str:
@@ -277,7 +308,10 @@ async def _users_text() -> str:
             )
         )
     lines = ["Пользователи с активной подпиской", ""]
-    lines.extend(f"@{user.username} | {user.telegram_id}" if user.username else str(user.telegram_id) for user in users)
+    lines.extend(
+        f"@{user.username} | {user.telegram_id}" if user.username else str(user.telegram_id)
+        for user in users
+    )
     return "\n".join(lines if users else [*lines, "Пользователей нет."])
 
 
@@ -292,7 +326,10 @@ async def _health_events_text(status: str) -> str:
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         pass
     lines = [title, ""]
-    lines.extend(f"{item.get('time', '-')} | {str(item.get('details', ''))[:120]}" for item in events[-20:][::-1])
+    lines.extend(
+        f"{item.get('time', '-')} | {str(item.get('details', ''))[:120]}"
+        for item in events[-20:][::-1]
+    )
     return "\n".join(lines if events else [*lines, "Событий пока нет."])
 
 

@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.admin.service import AdminPermissionService
@@ -65,9 +66,7 @@ async def promo_list(callback: CallbackQuery, state: FSMContext) -> None:
         )
         if scope is not None:
             statement = (
-                statement.where(Plan.channel_id.in_(scope))
-                if scope
-                else statement.where(False)
+                statement.where(Plan.channel_id.in_(scope)) if scope else statement.where(False)
             )
         promos = list(await session.scalars(statement))
     await callback.answer()
@@ -102,8 +101,7 @@ async def promo_list(callback: CallbackQuery, state: FSMContext) -> None:
     )
     await _edit(
         callback,
-        f"Промокоды: {'активные' if filter_token == 'active' else 'архив'}\n"
-        f"Найдено: {len(promos)}",
+        f"Промокоды: {'активные' if filter_token == 'active' else 'архив'}\nНайдено: {len(promos)}",
         InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -167,17 +165,13 @@ async def promo_create_code(message: Message, state: FSMContext) -> None:
         await message.answer(str(exc))
         return
     async with async_session_factory() as session:
-        duplicate = await session.scalar(
-            select(PromoCode.id).where(PromoCode.code == code)
-        )
+        duplicate = await session.scalar(select(PromoCode.id).where(PromoCode.code == code))
     if duplicate is not None:
         await message.answer("Такой промокод уже существует.")
         return
     await state.update_data(code=code)
     await state.set_state(PromoAdminForm.discount_percent)
-    await message.answer(
-        "Введите скидку в процентах: целое число от 1 до 99."
-    )
+    await message.answer("Введите скидку в процентах: целое число от 1 до 99.")
 
 
 @router.message(PromoAdminForm.discount_percent)
@@ -255,7 +249,18 @@ async def promo_create_limit(message: Message, state: FSMContext) -> None:
             created_by_telegram_id=message.from_user.id,
         )
         session.add(promo)
-        await session.flush()
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            claimed = await session.scalar(
+                select(PromoCode.id).where(PromoCode.code == data["code"])
+            )
+            if claimed is None:
+                raise
+            await state.set_state(PromoAdminForm.code)
+            await message.answer("Промокод с таким кодом уже существует. Введите другой код.")
+            return
         await AdminPermissionService(session).audit(
             message.from_user.id,
             "promo.create",
@@ -323,8 +328,7 @@ async def promo_card(callback: CallbackQuery, state: FSMContext) -> None:
         f"Окончание: {promo.valid_until:%d.%m.%Y %H:%M} UTC\n"
         f"Использовано: {promo.redemptions_count}/{promo.max_redemptions}\n"
         f"Лимит на пользователя: {promo.per_user_limit}\n\n"
-        "Последние применения:\n"
-        + ("\n".join(recent_lines) if recent_lines else "нет")
+        "Последние применения:\n" + ("\n".join(recent_lines) if recent_lines else "нет")
     )
     rows = [
         [
@@ -362,9 +366,7 @@ async def promo_card(callback: CallbackQuery, state: FSMContext) -> None:
         [
             InlineKeyboardButton(
                 text="К списку",
-                callback_data=(
-                    "cfg:promos:active" if promo.is_active else "cfg:promos:archive"
-                ),
+                callback_data=("cfg:promos:active" if promo.is_active else "cfg:promos:archive"),
             )
         ],
     ]
@@ -420,12 +422,7 @@ async def promo_edit_plan_save(callback: CallbackQuery) -> None:
     async with async_session_factory() as session:
         promo = await _managed_promo(session, callback.from_user.id, promo_id)
         plan = await _managed_plan(session, callback.from_user.id, plan_id)
-        if (
-            promo is None
-            or plan is None
-            or not plan.is_active
-            or not plan.channel.is_active
-        ):
+        if promo is None or plan is None or not plan.is_active or not plan.channel.is_active:
             await callback.answer("Изменение недоступно.", show_alert=True)
             return
         if promo.redemptions_count > 0 or await _promo_locked_payment_count(
@@ -501,18 +498,14 @@ async def promo_edit_save(message: Message, state: FSMContext) -> None:
         try:
             if field == "discount":
                 if await _promo_locked_payment_count(session, promo.id):
-                    raise ValueError(
-                        "Скидку нельзя менять после создания счетов по промокоду."
-                    )
+                    raise ValueError("Скидку нельзя менять после создания счетов по промокоду.")
                 value = _bounded_int(message.text, 1, 99)
                 old_value = promo.discount_percent
                 promo.discount_percent = value
             elif field == "limit":
                 value = _bounded_int(message.text, 1, 1_000_000)
                 if value < promo.redemptions_count:
-                    raise ValueError(
-                        "Лимит не может быть меньше уже использованного количества."
-                    )
+                    raise ValueError("Лимит не может быть меньше уже использованного количества.")
                 old_value = promo.max_redemptions
                 promo.max_redemptions = value
             else:
@@ -682,10 +675,7 @@ async def support_item(callback: CallbackQuery) -> None:
     await callback.answer()
     await _edit(
         callback,
-        f"Контакт #{index + 1}\n\n"
-        f"Тип: {contact.kind}\n"
-        f"Значение: {value}\n"
-        f"Подпись: {contact.label}",
+        f"Контакт #{index + 1}\n\nТип: {contact.kind}\nЗначение: {value}\nПодпись: {contact.label}",
         InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -850,11 +840,7 @@ async def support_check(callback: CallbackQuery) -> None:
         await callback.answer("Контакт не найден.", show_alert=True)
         return
     contact = contacts[index]
-    chat_ref = (
-        f"@{contact.value}"
-        if contact.kind == "username"
-        else int(contact.value)
-    )
+    chat_ref = f"@{contact.value}" if contact.kind == "username" else int(contact.value)
     try:
         chat = await callback.bot.get_chat(chat_ref)
     except TelegramAPIError:
@@ -999,9 +985,7 @@ async def reminder_settings(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.answer("Только для superadmin.", show_alert=True)
             return
         settings = get_settings()
-        intervals = await RuntimeSettingsService(
-            session
-        ).notification_intervals_minutes(
+        intervals = await RuntimeSettingsService(session).notification_intervals_minutes(
             settings.notification_intervals_minutes,
             settings.notification_days,
         )
@@ -1069,8 +1053,7 @@ async def reminder_set_save(message: Message, state: FSMContext) -> None:
         await session.commit()
     await state.clear()
     await message.answer(
-        "Интервалы сохранены: "
-        + ", ".join(_format_interval(item) for item in intervals),
+        "Интервалы сохранены: " + ", ".join(_format_interval(item) for item in intervals),
         reply_markup=admin_menu_keyboard(),
     )
 
@@ -1103,9 +1086,7 @@ async def reminder_reset(callback: CallbackQuery) -> None:
         return
     async with async_session_factory() as session:
         runtime = RuntimeSettingsService(session)
-        removed = await runtime.delete(
-            RuntimeSettingsService.NOTIFICATION_INTERVALS_MINUTES
-        )
+        removed = await runtime.delete(RuntimeSettingsService.NOTIFICATION_INTERVALS_MINUTES)
         await AdminPermissionService(session).audit(
             callback.from_user.id,
             "settings.notification_intervals.reset",
@@ -1155,11 +1136,7 @@ async def _managed_active_plans(session, telegram_id: int) -> list[Plan]:
         .order_by(Plan.channel_id, Plan.price)
     )
     if scope is not None:
-        statement = (
-            statement.where(Plan.channel_id.in_(scope))
-            if scope
-            else statement.where(False)
-        )
+        statement = statement.where(Plan.channel_id.in_(scope)) if scope else statement.where(False)
     plans = list(await session.scalars(statement))
     settings = get_settings()
     materials_id = await RuntimeSettingsService(session).get(
@@ -1170,10 +1147,7 @@ async def _managed_active_plans(session, telegram_id: int) -> list[Plan]:
         plan
         for plan in plans
         if plan.channel.is_active
-        and (
-            materials_id is None
-            or plan.channel.telegram_chat_id != int(materials_id)
-        )
+        and (materials_id is None or plan.channel.telegram_chat_id != int(materials_id))
     ]
 
 
@@ -1200,9 +1174,7 @@ async def _promo_locked_payment_count(session, promo_id: int) -> int:
         await session.scalar(
             select(func.count(Payment.id)).where(
                 Payment.promo_code_id == promo_id,
-                Payment.status.in_(
-                    [PaymentStatus.PENDING, PaymentStatus.PAID]
-                ),
+                Payment.status.in_([PaymentStatus.PENDING, PaymentStatus.PAID]),
             )
         )
         or 0

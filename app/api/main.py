@@ -7,8 +7,8 @@ from aiogram import Bot
 from fastapi import FastAPI, Request
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api.routes import health, webhooks
 from app.admin.routes import router as admin_router
+from app.api.routes import health, webhooks
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.request_context import request_id_context

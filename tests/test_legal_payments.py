@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 
@@ -20,7 +21,9 @@ class FakeProvider:
 async def test_payment_requires_current_legal_acceptance(session, monkeypatch) -> None:
     settings = Settings(_env_file=None, app_env="test", legal_version="v1")
     monkeypatch.setattr("app.services.legal_service.get_settings", lambda: settings)
-    monkeypatch.setattr("app.services.payment_service.get_payment_provider", lambda _: FakeProvider())
+    monkeypatch.setattr(
+        "app.services.payment_service.get_payment_provider", lambda _: FakeProvider()
+    )
 
     user = User(telegram_id=123)
     channel = Channel(telegram_chat_id=-1001, title="Channel")
@@ -30,7 +33,7 @@ async def test_payment_requires_current_legal_acceptance(session, monkeypatch) -
         channel_id=channel.id,
         title="Month",
         duration_days=30,
-        price=Decimal("100"),
+        price=Decimal(100),
         currency="RUB",
     )
     session.add(plan)
@@ -66,10 +69,10 @@ async def test_new_legal_version_requires_acceptance_again(session) -> None:
 
 
 def test_stars_use_provider_specific_price() -> None:
-    plan = Plan(price=Decimal("4990"), currency="RUB", stars_price=500)
+    plan = Plan(price=Decimal(4990), currency="RUB", stars_price=500)
 
-    assert PaymentService._provider_price(plan, "cryptobot") == (Decimal("4990"), "RUB")
-    assert PaymentService._provider_price(plan, "telegram-stars") == (Decimal("500"), "XTR")
+    assert PaymentService._provider_price(plan, "cryptobot") == (Decimal(4990), "RUB")
+    assert PaymentService._provider_price(plan, "telegram-stars") == (Decimal(500), "XTR")
 
 
 def test_production_configuration_rejects_unsafe_defaults() -> None:
@@ -125,7 +128,9 @@ def test_valid_production_configuration_is_accepted() -> None:
 async def test_stale_or_repriced_pending_invoice_is_replaced(session, monkeypatch) -> None:
     settings = Settings(_env_file=None, app_env="test", legal_version="v1")
     monkeypatch.setattr("app.services.legal_service.get_settings", lambda: settings)
-    monkeypatch.setattr("app.services.payment_service.get_payment_provider", lambda _: FakeProvider())
+    monkeypatch.setattr(
+        "app.services.payment_service.get_payment_provider", lambda _: FakeProvider()
+    )
     user = User(telegram_id=777)
     channel = Channel(telegram_chat_id=-2001, title="Channel")
     session.add_all([user, channel])
@@ -134,7 +139,7 @@ async def test_stale_or_repriced_pending_invoice_is_replaced(session, monkeypatc
         channel_id=channel.id,
         title="Month",
         duration_days=30,
-        price=Decimal("100"),
+        price=Decimal(100),
         currency="RUB",
     )
     session.add(plan)
@@ -145,7 +150,7 @@ async def test_stale_or_repriced_pending_invoice_is_replaced(session, monkeypatc
         plan_id=plan.id,
         provider="fake",
         provider_payment_id="old-invoice",
-        amount=Decimal("100"),
+        amount=Decimal(100),
         currency="RUB",
         idempotency_key="old-idempotency",
         created_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2),
@@ -153,12 +158,12 @@ async def test_stale_or_repriced_pending_invoice_is_replaced(session, monkeypatc
     session.add(old)
     await session.commit()
 
-    plan.price = Decimal("200")
+    plan.price = Decimal(200)
     await session.commit()
     replacement = await PaymentService(session).create_payment(user, plan, "fake")
 
     assert replacement.id != old.id
-    assert replacement.amount == Decimal("200")
+    assert replacement.amount == Decimal(200)
     assert old.status.value == "expired"
 
 
@@ -172,7 +177,7 @@ async def test_external_payment_id_is_unique_per_provider(session) -> None:
         channel_id=channel.id,
         title="Month",
         duration_days=30,
-        price=Decimal("100"),
+        price=Decimal(100),
         currency="RUB",
     )
     session.add(plan)
@@ -181,7 +186,7 @@ async def test_external_payment_id_is_unique_per_provider(session) -> None:
         "user_id": user.id,
         "plan_id": plan.id,
         "provider_payment_id": "same-external-id",
-        "amount": Decimal("100"),
+        "amount": Decimal(100),
         "currency": "RUB",
     }
     session.add_all(

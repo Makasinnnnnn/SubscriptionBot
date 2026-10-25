@@ -11,8 +11,8 @@ import asyncio
 import os
 
 from app.api.main import app  # noqa: F401
-from app.bot.runner import run_bot
 from app.bot.ops_runner import run_ops_bot
+from app.bot.runner import run_bot
 from app.tasks.scheduler import run_scheduler
 
 
